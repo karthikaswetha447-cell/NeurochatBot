@@ -58,7 +58,6 @@ demo = gr.ChatInterface(
     fn=neurobot,
     title="🤖 NeuroBot",
     description="Your AI Assistant | Powered by NeuroGen AI Academy",
-    type="messages"
 )
 
 
