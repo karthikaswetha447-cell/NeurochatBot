@@ -1,6 +1,7 @@
 
 import os
 import json
+import time
 import gradio as gr
 from groq import Groq
 
@@ -194,7 +195,114 @@ def build_relevant_context(message, history):
 
 
 # ==========================================
-# 6. NEUROBOT CHAT FUNCTION
+# 6. CHATBOT EVALUATION FUNCTION
+# ==========================================
+
+def evaluate_response(question, answer, official_context=None):
+
+    evaluation_prompt = """
+You are a chatbot response evaluator.
+
+Evaluate the chatbot answer using these two metrics:
+
+1. Relevance:
+Does the answer directly address the user's question?
+
+2. Accuracy:
+Is the answer factually correct based on the available
+information? For general questions, assess factual correctness
+using your knowledge. For course-related questions, use the
+official context provided. Do not reward unsupported claims.
+
+Give each metric a score from 0 to 10.
+
+Return ONLY valid JSON in this format:
+
+{
+    "relevance": 8,
+    "accuracy": 9,
+    "relevance_reason": "Short explanation",
+    "accuracy_reason": "Short explanation"
+}
+
+Do not include markdown or extra text.
+"""
+
+    evaluation_input = {
+        "question": question,
+        "chatbot_answer": answer,
+        "official_context": official_context
+    }
+
+    try:
+
+        evaluation = client.chat.completions.create(
+
+            model=model_name,
+
+            messages=[
+                {
+                    "role": "system",
+                    "content": evaluation_prompt
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        evaluation_input,
+                        ensure_ascii=False
+                    )
+                }
+            ],
+
+            temperature=0,
+            max_completion_tokens=300,
+            top_p=1
+        )
+
+        result_text = evaluation.choices[0].message.content
+
+        result_text = result_text.strip()
+
+        # Extract JSON if the model adds extra text
+
+        start = result_text.find("{")
+        end = result_text.rfind("}")
+
+        if start == -1 or end == -1:
+            raise ValueError("Evaluation JSON not found")
+
+        result = json.loads(result_text[start:end + 1])
+
+        relevance = max(
+            0,
+            min(10, float(result["relevance"]))
+        )
+
+        accuracy = max(
+            0,
+            min(10, float(result["accuracy"]))
+        )
+
+        return {
+            "relevance": relevance,
+            "accuracy": accuracy,
+            "relevance_reason": result.get(
+                "relevance_reason", "Not provided"
+            ),
+            "accuracy_reason": result.get(
+                "accuracy_reason", "Not provided"
+            )
+        }
+
+    except Exception as error:
+
+        print("Evaluation Error:", str(error))
+
+        return None
+
+
+# ==========================================
+# 7. NEUROBOT CHAT FUNCTION
 # ==========================================
 
 def neurobot(
@@ -244,13 +352,15 @@ PRIVACY:
 
 
     # ======================================
-    # 7. OFFICIAL COURSE INFORMATION
+    # 8. OFFICIAL COURSE INFORMATION
     # ======================================
 
     grounding_context = build_relevant_context(
         message,
         history
     )
+
+    official_data = None
 
     if grounding_context is not None:
 
@@ -261,15 +371,15 @@ PRIVACY:
                 "information right now. Please try again later."
             )
 
-        official_data = json.dumps(
-            grounding_context["data"],
-            ensure_ascii=False,
-            indent=2
-        )
+        official_data = grounding_context["data"]
 
         source_message = (
             "OFFICIAL COURSE INFORMATION:\n"
-            + official_data
+            + json.dumps(
+                official_data,
+                ensure_ascii=False,
+                indent=2
+            )
             + "\n\nSOURCE: "
             + grounding_context["source"]
             + "\n\nUse this information as the only authority "
@@ -285,7 +395,7 @@ PRIVACY:
 
 
     # ======================================
-    # 8. CONVERSATION HISTORY
+    # 9. CONVERSATION HISTORY
     # ======================================
 
     for item in history or []:
@@ -325,7 +435,7 @@ PRIVACY:
 
 
     # ======================================
-    # 9. CURRENT USER MESSAGE
+    # 10. CURRENT USER MESSAGE
     # ======================================
 
     messages.append({
@@ -335,10 +445,12 @@ PRIVACY:
 
 
     # ======================================
-    # 10. GROQ RESPONSE WITH LLM PARAMETERS
+    # 11. GROQ RESPONSE WITH LLM PARAMETERS
     # ======================================
 
     try:
+
+        start_time = time.perf_counter()
 
         response = client.chat.completions.create(
 
@@ -346,17 +458,88 @@ PRIVACY:
 
             messages=messages,
 
-            # Controls response creativity
             temperature=temperature,
 
-            # Controls maximum response length
             max_completion_tokens=int(max_output_tokens),
 
-            # Controls token selection diversity
             top_p=top_p
         )
 
-        return response.choices[0].message.content
+        # Calculate chatbot response latency
+
+        latency = round(
+            time.perf_counter() - start_time,
+            2
+        )
+
+        answer = response.choices[0].message.content or ""
+
+        # Get actual API token usage
+
+        usage = response.usage
+
+        if usage:
+
+            input_tokens = usage.prompt_tokens
+            output_tokens = usage.completion_tokens
+            total_tokens = usage.total_tokens
+
+        else:
+
+            input_tokens = 0
+            output_tokens = 0
+            total_tokens = 0
+
+
+        # ==================================
+        # 12. EVALUATE CHATBOT RESPONSE
+        # ==================================
+
+        evaluation = evaluate_response(
+            message,
+            answer,
+            official_data
+        )
+
+
+        # ==================================
+        # 13. BUILD EVALUATION REPORT
+        # ==================================
+
+        report = f"""
+
+---
+
+### 📊 NeuroBot Evaluation Report
+
+**1. Relevance:** {evaluation['relevance']}/10
+{evaluation['relevance_reason']}
+
+**2. Accuracy:** {evaluation['accuracy']}/10
+{evaluation['accuracy_reason']}
+
+""" if evaluation else """
+
+---
+
+### 📊 NeuroBot Evaluation Report
+
+Relevance and Accuracy evaluation is currently unavailable.
+
+"""
+
+        report += f"""**3. Latency:** {latency} seconds
+
+**4. Token Usage:**
+- Input Tokens: {input_tokens}
+- Output Tokens: {output_tokens}
+- Total Tokens: {total_tokens}
+
+<small>Relevance and Accuracy are AI-estimated scores, not independently verified results. Token usage refers to the main chatbot response, excluding the evaluation call.</small>
+"""
+
+        return answer + "\n\n" + report
+
 
     except Exception as error:
 
@@ -366,7 +549,7 @@ PRIVACY:
 
 
 # ==========================================
-# 11. GRADIO INTERFACE
+# 14. GRADIO INTERFACE
 # ==========================================
 
 demo = gr.ChatInterface(
@@ -375,7 +558,10 @@ demo = gr.ChatInterface(
 
     title="🤖 NeuroBot",
 
-    description="Your AI Assistant | Powered by NeuroGen AI Academy",
+    description=(
+        "Your AI Assistant | Powered by NeuroGen AI Academy"
+        "\n\nChatbot with LLM Parameters and Evaluation Metrics"
+    ),
 
     additional_inputs=[
 
@@ -410,7 +596,7 @@ demo = gr.ChatInterface(
 
 
 # ==========================================
-# 12. START NEUROBOT ON RENDER
+# 15. START NEUROBOT ON RENDER
 # ==========================================
 
 if __name__ == "__main__":
