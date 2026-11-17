@@ -1,11 +1,15 @@
 
 import os
 import fitz
+from sentence_transformers import SentenceTransformer
 
-# Find the project folder
+
+# ==========================================
+# 1. PDF LOCATION
+# ==========================================
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# PDF file location
 PDF_PATH = os.path.join(
     BASE_DIR,
     "documents",
@@ -13,7 +17,10 @@ PDF_PATH = os.path.join(
 )
 
 
-# STEP 1: Chunking function
+# ==========================================
+# 2. CHUNKING FUNCTION
+# ==========================================
+
 def split_into_chunks(text, chunk_size=500, overlap=100):
 
     chunks = []
@@ -29,101 +36,145 @@ def split_into_chunks(text, chunk_size=500, overlap=100):
         if chunk:
             chunks.append(chunk)
 
-        # Move forward, keeping some text from previous chunk
         start += chunk_size - overlap
 
     return chunks
 
 
-# STEP 2: Read PDF and create chunks
-def test_pdf():
+# ==========================================
+# 3. READ PDF AND CREATE CHUNKS
+# ==========================================
 
-    print("\n========== PDF TEST STARTED ==========")
+def create_embeddings():
 
-    print("Project folder:", BASE_DIR)
-    print("PDF path:", PDF_PATH)
-    print("PDF exists:", os.path.isfile(PDF_PATH))
+    print("\n======================================")
+    print("NEUROBOT EMBEDDING TEST STARTED")
+    print("======================================")
+
+    print("PDF location:", PDF_PATH)
 
     if not os.path.isfile(PDF_PATH):
 
-        print("\nERROR: syllabus.pdf was not found.")
-
-        print("Check your folder structure:")
-        print("documents/syllabus.pdf")
+        print("ERROR: PDF file not found.")
+        print("Check documents/syllabus.pdf")
 
         return
 
     try:
 
-        # Open PDF
         pdf = fitz.open(PDF_PATH)
 
-        print("\nPDF opened successfully!")
+        all_chunks = []
+
+        print("PDF opened successfully!")
         print("Total pages:", len(pdf))
 
-        total_chunks = 0
-        total_characters = 0
-
-        # Read each page
         for page_number, page in enumerate(pdf, start=1):
 
             page_text = page.get_text("text").strip()
 
-            print(f"\nReading Page {page_number}...")
-
             if not page_text:
 
-                print("No selectable text found on this page.")
-                print("This page may need OCR.")
-
+                print("No selectable text on page:", page_number)
                 continue
 
-            total_characters += len(page_text)
-
-            # Split this page into smaller chunks
             chunks = split_into_chunks(
                 page_text,
                 chunk_size=500,
                 overlap=100
             )
 
-            # Display each chunk
             for chunk_number, chunk in enumerate(chunks, start=1):
 
-                total_chunks += 1
-
-                print(
-                    f"\n========== PAGE {page_number} "
-                    f"| CHUNK {chunk_number} =========="
-                )
-
-                print(chunk)
+                all_chunks.append({
+                    "text": chunk,
+                    "page": page_number,
+                    "chunk": chunk_number
+                })
 
         pdf.close()
 
-        # Final summary
-        print("\n========== FINAL SUMMARY ==========")
+        print("\nTotal chunks created:", len(all_chunks))
 
-        print("Total PDF pages:", len(pdf))
-        print("Total extracted characters:", total_characters)
-        print("Total chunks created:", total_chunks)
+        if not all_chunks:
 
-        if total_chunks > 0:
+            print("ERROR: No text chunks found.")
+            return
 
-            print("\nSUCCESS: PDF reading and chunking completed!")
 
-        else:
+        # ==================================
+        # 4. LOAD EMBEDDING MODEL
+        # ==================================
 
-            print("\nWARNING: No chunks were created.")
+        print("\nLoading embedding model...")
+
+        model = SentenceTransformer(
+            "sentence-transformers/all-MiniLM-L6-v2"
+        )
+
+        print("Embedding model loaded successfully!")
+
+
+        # ==================================
+        # 5. CONVERT TEXT INTO EMBEDDINGS
+        # ==================================
+
+        texts = [
+            item["text"]
+            for item in all_chunks
+        ]
+
+        embeddings = model.encode(
+            texts,
+            convert_to_numpy=True,
+            show_progress_bar=True
+        )
+
+
+        # ==================================
+        # 6. DISPLAY EMBEDDING RESULTS
+        # ==================================
+
+        print("\n======================================")
+        print("EMBEDDING RESULTS")
+        print("======================================")
+
+        print("Total chunks:", len(texts))
+        print("Embedding shape:", embeddings.shape)
+
+        for index, item in enumerate(all_chunks):
+
+            print("\nPage:", item["page"])
+            print("Chunk:", item["chunk"])
+
+            print(
+                "Vector dimensions:",
+                len(embeddings[index])
+            )
+
+            print(
+                "First 5 vector values:",
+                embeddings[index][:5]
+            )
+
+
+        # ==================================
+        # 7. SUCCESS MESSAGE
+        # ==================================
+
+        print("\n======================================")
+        print("SUCCESS: EMBEDDINGS CREATED!")
+        print("======================================")
+
+        return embeddings
 
     except Exception as error:
 
-        print("\nPDF READING ERROR:", str(error))
+        print("\nEMBEDDING ERROR:", str(error))
 
-    print("\n========== PDF TEST FINISHED ==========")
+        return None
 
 
-# STEP 3: Run the program
 if __name__ == "__main__":
 
-    test_pdf()
+    create_embeddings()
