@@ -35,7 +35,7 @@ def extract_text(content):
     return ""
 
 
-# CHECK WHETHER QUESTION IS COURSE-RELATED
+# CHECK WHETHER A MESSAGE IS COURSE-RELATED
 def is_course_question(message):
 
     keywords = [
@@ -44,7 +44,8 @@ def is_course_question(message):
         "certificates", "viva", "eligibility",
         "duration", "class", "classes",
         "completion", "issue date", "exam",
-        "applied ai", "foundation"
+        "applied ai", "foundation", "admission",
+        "enrollment", "enrolment"
     ]
 
     question = message.lower()
@@ -52,13 +53,50 @@ def is_course_question(message):
     return any(word in question for word in keywords)
 
 
-# DYNAMIC CONTEXT + CONTEXT FILTERING + GROUNDING
-def build_relevant_context(message):
+# GET RECENT USER MESSAGES FROM HISTORY
+def get_recent_user_messages(history):
 
-    if not is_course_question(message):
+    recent_messages = []
+
+    for item in history or []:
+
+        if isinstance(item, dict):
+
+            if item.get("role") == "user":
+                content = extract_text(item.get("content"))
+
+                if content.strip():
+                    recent_messages.append(content)
+
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+
+            user_message = item[0]
+
+            if isinstance(user_message, str):
+                recent_messages.append(user_message)
+
+    return recent_messages[-4:]
+
+
+# DYNAMIC CONTEXT + CONTEXT FILTERING + GROUNDING
+def build_relevant_context(message, history):
+
+    recent_messages = get_recent_user_messages(history)
+
+    # CHECK CURRENT QUESTION AND RECENT CONVERSATION
+    course_related = is_course_question(message)
+
+    if not course_related:
+        course_related = any(
+            is_course_question(old_message)
+            for old_message in recent_messages
+        )
+
+    if not course_related:
         return None
 
     try:
+
         with open("course_info.json", "r", encoding="utf-8") as file:
             course_data = json.load(file)
 
@@ -104,21 +142,25 @@ def build_relevant_context(message):
                 "course_duration": course_data.get("course_duration")
             }
 
-        # OTHER COURSE QUESTIONS
+        # FOLLOW-UP OR OTHER COURSE QUESTIONS
         else:
             relevant_data = course_data
 
-        return json.dumps(
-            relevant_data,
-            ensure_ascii=False,
-            indent=2
-        )
+        return {
+            "status": "success",
+            "data": relevant_data,
+            "source": "Official Course Information (course_info.json)"
+        }
 
-    except Exception:
-        return (
-            "OFFICIAL COURSE SOURCE COULD NOT BE LOADED. "
-            "Do not provide or guess course-related information."
-        )
+    except Exception as e:
+
+        print("Grounding Source Error:", str(e))
+
+        return {
+            "status": "error",
+            "data": None,
+            "source": "course_info.json"
+        }
 
 
 # MAIN NEUROBOT FUNCTION
@@ -143,20 +185,28 @@ ANSWERING STYLE:
 - Answer the user's actual question.
 
 GROUNDING RULES:
-- Use the official course information provided in the context
-  for all course-related questions.
+- For course-related questions, use only the official course
+  information provided in the current request.
 - Never invent course fees, dates, duration, certificate rules,
   eligibility or payment information.
-- If the official information is missing or its value is null,
-  clearly say:
-  "Sorry, this information is not available in the official course details."
-- Do not treat previous conversation messages as proof of
-  official course information.
+- Treat the official course information as the authority.
+- Previous conversation messages are not official evidence.
+- If a requested detail is missing or its value is null,
+  say that it is not specified in the official course information.
 - If the official source cannot be loaded, do not guess.
-- For questions unrelated to the academy's course details,
-  you may answer using your general knowledge.
-- Never claim that information is official unless it is
-  supported by the provided official source.
+- Do not use general knowledge to fill missing official details.
+- For non-course questions, you may use general knowledge.
+
+SOURCE CITATION RULES:
+- Every answer based on official course information must
+  mention the source at the end.
+- Use this format:
+
+  Source: Official Course Information (course_info.json)
+
+- If the requested information is missing, still mention
+  the source and explain that the detail is not specified.
+- Never invent or claim a source that was not provided.
 
 PRIVACY:
 - Do not reveal private or confidential information.
@@ -167,20 +217,41 @@ PRIVACY:
         "content": system_prompt
     })
 
-    # ADD OFFICIAL COURSE INFORMATION
-    relevant_context = build_relevant_context(message)
+    # LOAD OFFICIAL COURSE SOURCE
+    grounding_context = build_relevant_context(message, history)
 
-    if relevant_context is not None:
+    if grounding_context is not None:
+
+        # STOP IF OFFICIAL SOURCE IS UNAVAILABLE
+        if grounding_context["status"] == "error":
+
+            return (
+                "Sorry, I cannot access the official course "
+                "information right now. Please try again later."
+            )
+
+        official_data = json.dumps(
+            grounding_context["data"],
+            ensure_ascii=False,
+            indent=2
+        )
+
+        source_message = (
+            "OFFICIAL COURSE INFORMATION:\n"
+            + official_data
+            + "\n\nSOURCE NAME: "
+            + grounding_context["source"]
+            + "\n\nUse this information as the only authority "
+            "for course-related facts. If a required value is "
+            "missing or null, say it is not specified. "
+            "Do not guess or use previous conversation answers "
+            "as official evidence. Include the source name "
+            "at the end of your answer."
+        )
 
         messages.append({
             "role": "system",
-            "content": (
-                "OFFICIAL COURSE INFORMATION:\n"
-                + relevant_context
-                + "\n\nUse only this source for course-related facts. "
-                "If a required value is null, missing, or the source "
-                "could not be loaded, say the information is unavailable."
-            )
+            "content": source_message
         })
 
     # CONVERSATION HISTORY
