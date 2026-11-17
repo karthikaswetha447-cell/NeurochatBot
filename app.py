@@ -362,32 +362,20 @@ demo = gr.ChatInterface(
 
 
 # ==========================================
-# 8. STARTUP: TEST PDF EMBEDDINGS
+# 8. START NEUROBOT ON RENDER
 # ==========================================
 
 if __name__ == "__main__":
 
-    print("\n======================================")
+    print("======================================")
     print("NEUROBOT STARTING")
     print("======================================")
 
-    try:
+    port = int(os.environ.get("PORT", 10000))
 
-        print("\nSTARTING EMBEDDING TEST...")
+    print(f"Starting NeuroBot on port: {port}")
 
-        from test_embeddings import create_embeddings
-
-        create_embeddings()
-
-        print("\nEMBEDDING TEST FINISHED.")
-
-    except Exception as error:
-
-        print("\nEMBEDDING TEST COULD NOT RUN:", str(error))
-
-
-    # Start chatbot
     demo.launch(
         server_name="0.0.0.0",
-        server_port=int(os.environ.get("PORT", 10000))
+        server_port=port
     )
