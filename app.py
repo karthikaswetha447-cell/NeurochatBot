@@ -17,7 +17,7 @@ model_name = "openai/gpt-oss-20b"
 
 
 # ==========================================
-# 2. EXTRACT TEXT FROM CONVERSATION HISTORY
+# 2. EXTRACT TEXT FROM HISTORY
 # ==========================================
 
 def extract_text(content):
@@ -45,7 +45,7 @@ def extract_text(content):
 
 
 # ==========================================
-# 3. CHECK COURSE-RELATED QUESTIONS
+# 3. COURSE QUESTION DETECTION
 # ==========================================
 
 def is_course_question(message):
@@ -66,7 +66,7 @@ def is_course_question(message):
 
 
 # ==========================================
-# 4. GET RECENT USER MESSAGES
+# 4. RECENT USER MESSAGES
 # ==========================================
 
 def get_recent_user_messages(history):
@@ -95,7 +95,7 @@ def get_recent_user_messages(history):
 
 
 # ==========================================
-# 5. DYNAMIC CONTEXT + CONTEXT FILTERING
+# 5. DYNAMIC CONTEXT AND FILTERING
 # ==========================================
 
 def build_relevant_context(message, history):
@@ -133,7 +133,6 @@ def build_relevant_context(message, history):
 
         question = message.lower()
 
-        # FEE INFORMATION
         if any(word in question for word in [
             "fee", "fees", "price", "cost",
             "payment", "amount"
@@ -146,7 +145,6 @@ def build_relevant_context(message, history):
                 "updated_on": course_data.get("updated_on")
             }
 
-        # CERTIFICATE INFORMATION
         elif any(word in question for word in [
             "certificate", "certificates",
             "viva", "issue date", "eligibility"
@@ -163,7 +161,6 @@ def build_relevant_context(message, history):
                 )
             }
 
-        # COURSE DURATION
         elif any(word in question for word in [
             "duration", "hours", "how long"
         ]):
@@ -173,7 +170,6 @@ def build_relevant_context(message, history):
                 "course_duration": course_data.get("course_duration")
             }
 
-        # OTHER COURSE QUESTIONS
         else:
 
             relevant_data = course_data
@@ -184,9 +180,9 @@ def build_relevant_context(message, history):
             "source": "Official Course Information (course_info.json)"
         }
 
-    except Exception as e:
+    except Exception as error:
 
-        print("Grounding Source Error:", str(e))
+        print("Grounding Source Error:", str(error))
 
         return {
             "status": "error",
@@ -196,14 +192,13 @@ def build_relevant_context(message, history):
 
 
 # ==========================================
-# 6. MAIN NEUROBOT FUNCTION
+# 6. NEUROBOT CHAT FUNCTION
 # ==========================================
 
 def neurobot(message, history):
 
     messages = []
 
-    # SYSTEM CONTEXT
     system_prompt = """
 You are NeuroBot, an AI assistant created by NeuroGen AI Academy.
 
@@ -220,28 +215,21 @@ ANSWERING STYLE:
 - Answer the user's actual question.
 
 GROUNDING RULES:
-- For course-related questions, use only the official course
-  information provided in the current request.
-- Never invent course fees, dates, duration, certificate rules,
-  eligibility or payment information.
-- Treat the official course information as the authority.
-- Previous conversation messages are not official evidence.
-- If a requested detail is missing or its value is null,
-  say that it is not specified in the official course information.
-- If the official source cannot be loaded, do not guess.
-- Do not use general knowledge to fill missing official details.
+- For course-related questions, use only the official
+  course information provided in the current request.
+- Never invent course fees, dates, duration,
+  certificate rules or eligibility.
+- If a requested detail is missing or null,
+  say it is not specified in the official information.
+- Do not use previous conversation messages as
+  official evidence.
 - For non-course questions, you may use general knowledge.
 
-SOURCE CITATION RULES:
-- Every answer based on official course information must
-  mention the source at the end.
+SOURCE RULES:
+- Mention the official source at the end of
+  course-related answers.
 - Use this format:
-
   Source: Official Course Information (course_info.json)
-
-- If the requested information is missing, still mention
-  the source and explain that the detail is not specified.
-- Never invent or claim a source that was not provided.
 
 PRIVACY:
 - Do not reveal private or confidential information.
@@ -254,10 +242,13 @@ PRIVACY:
 
 
     # ======================================
-    # LOAD OFFICIAL COURSE INFORMATION
+    # OFFICIAL COURSE INFORMATION
     # ======================================
 
-    grounding_context = build_relevant_context(message, history)
+    grounding_context = build_relevant_context(
+        message,
+        history
+    )
 
     if grounding_context is not None:
 
@@ -277,14 +268,12 @@ PRIVACY:
         source_message = (
             "OFFICIAL COURSE INFORMATION:\n"
             + official_data
-            + "\n\nSOURCE NAME: "
+            + "\n\nSOURCE: "
             + grounding_context["source"]
             + "\n\nUse this information as the only authority "
-            "for course-related facts. If a required value is "
-            "missing or null, say it is not specified. "
-            "Do not guess or use previous conversation answers "
-            "as official evidence. Include the source name "
-            "at the end of your answer."
+            "for course-related facts. If a requested value "
+            "is missing or null, say it is not specified. "
+            "Do not guess. Include the source at the end."
         )
 
         messages.append({
@@ -332,7 +321,7 @@ PRIVACY:
 
 
     # ======================================
-    # CURRENT USER MESSAGE
+    # CURRENT MESSAGE
     # ======================================
 
     messages.append({
@@ -342,7 +331,7 @@ PRIVACY:
 
 
     # ======================================
-    # SEND REQUEST TO GROQ
+    # GROQ RESPONSE
     # ======================================
 
     try:
@@ -354,18 +343,15 @@ PRIVACY:
 
         return response.choices[0].message.content
 
-    except Exception as e:
+    except Exception as error:
 
-        print("NeuroBot Error:", str(e))
+        print("NeuroBot Error:", str(error))
 
-        return (
-            "Sorry, something went wrong. "
-            "Please try again."
-        )
+        return "Sorry, something went wrong. Please try again."
 
 
 # ==========================================
-# 7. GRADIO CHAT INTERFACE
+# 7. GRADIO INTERFACE
 # ==========================================
 
 demo = gr.ChatInterface(
@@ -376,32 +362,31 @@ demo = gr.ChatInterface(
 
 
 # ==========================================
-# 8. LAUNCH APPLICATION + TEST PDF
+# 8. STARTUP: TEST PDF EMBEDDINGS
 # ==========================================
 
 if __name__ == "__main__":
 
-    print("\n====================================")
+    print("\n======================================")
     print("NEUROBOT STARTING")
-    print("====================================")
+    print("======================================")
 
-    # Run PDF test during Render startup
     try:
 
-        print("\n========== STARTING PDF TEST ==========")
+        print("\nSTARTING EMBEDDING TEST...")
 
-        from test_pdf import test_pdf
+        from test_embeddings import create_embeddings
 
-        test_pdf()
+        create_embeddings()
 
-        print("\n========== PDF TEST COMPLETED ==========")
+        print("\nEMBEDDING TEST FINISHED.")
 
-    except Exception as e:
+    except Exception as error:
 
-        print("\nPDF TEST COULD NOT RUN:", str(e))
+        print("\nEMBEDDING TEST COULD NOT RUN:", str(error))
 
 
-    # Start Gradio application
+    # Start chatbot
     demo.launch(
         server_name="0.0.0.0",
         server_port=int(os.environ.get("PORT", 10000))
