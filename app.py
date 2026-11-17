@@ -1,10 +1,10 @@
-
 import os
 import json
 import gradio as gr
-from groq import Groq
 import fitz
-from sentence_transformers import SentenceTransformer
+
+from groq import Groq
+from sentence_transformers import SentenceTransformer, util
 
 
 # ==========================================
@@ -19,7 +19,190 @@ model_name = "openai/gpt-oss-20b"
 
 
 # ==========================================
-# 2. EXTRACT TEXT FROM HISTORY
+# 2. RAG MODEL AND PDF KNOWLEDGE BASE
+# ==========================================
+
+print("Loading embedding model...")
+
+embedding_model = SentenceTransformer(
+    "all-MiniLM-L6-v2"
+)
+
+pdf_chunks = []
+pdf_embeddings = None
+
+
+# ==========================================
+# 3. LOAD PDF AND EXTRACT TEXT
+# ==========================================
+
+def load_pdf():
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    pdf_path = os.path.join(
+        base_dir,
+        "documents",
+        "syllabus.pdf"
+    )
+
+    pdf = fitz.open(pdf_path)
+
+    all_pages = []
+
+    for page_number, page in enumerate(pdf, start=1):
+
+        page_text = page.get_text("text")
+
+        if page_text.strip():
+            all_pages.append({
+                "page": page_number,
+                "text": page_text
+            })
+
+    pdf.close()
+
+    return all_pages
+
+
+# ==========================================
+# 4. SPLIT TEXT INTO CHUNKS
+# ==========================================
+
+def split_into_chunks(text, chunk_size=500, overlap=100):
+
+    chunks = []
+
+    start = 0
+
+    while start < len(text):
+
+        end = start + chunk_size
+
+        chunk = text[start:end].strip()
+
+        if chunk:
+            chunks.append(chunk)
+
+        start += chunk_size - overlap
+
+    return chunks
+
+
+# ==========================================
+# 5. CREATE PDF EMBEDDINGS
+# ==========================================
+
+def create_knowledge_base():
+
+    global pdf_chunks
+    global pdf_embeddings
+
+    try:
+
+        pages = load_pdf()
+
+        for page_data in pages:
+
+            page_number = page_data["page"]
+            page_text = page_data["text"]
+
+            chunks = split_into_chunks(page_text)
+
+            for chunk in chunks:
+
+                pdf_chunks.append({
+                    "text": chunk,
+                    "page": page_number
+                })
+
+        if not pdf_chunks:
+
+            print("No readable text found in PDF.")
+            return
+
+        chunk_texts = [
+            item["text"]
+            for item in pdf_chunks
+        ]
+
+        print("Creating PDF embeddings...")
+
+        pdf_embeddings = embedding_model.encode(
+            chunk_texts,
+            convert_to_tensor=True,
+            normalize_embeddings=True
+        )
+
+        print("PDF knowledge base ready!")
+        print("Total chunks:", len(pdf_chunks))
+
+    except Exception as error:
+
+        print("PDF Knowledge Base Error:", str(error))
+
+
+# Load PDF when application starts
+create_knowledge_base()
+
+
+# ==========================================
+# 6. RETRIEVE RELEVANT PDF INFORMATION
+# ==========================================
+
+def retrieve_relevant_chunks(message, top_k=3):
+
+    if pdf_embeddings is None or not pdf_chunks:
+        return None
+
+    try:
+
+        question_embedding = embedding_model.encode(
+            message,
+            convert_to_tensor=True,
+            normalize_embeddings=True
+        )
+
+        similarity_scores = util.cos_sim(
+            question_embedding,
+            pdf_embeddings
+        )[0]
+
+        top_results = similarity_scores.topk(
+            k=min(top_k, len(pdf_chunks))
+        )
+
+        retrieved_text = []
+
+        for score, index in zip(
+            top_results.values,
+            top_results.indices
+        ):
+
+            similarity = score.item()
+
+            if similarity < 0.25:
+                continue
+
+            chunk = pdf_chunks[index.item()]
+
+            retrieved_text.append(
+                f"Page {chunk['page']}:\n{chunk['text']}"
+            )
+
+        if not retrieved_text:
+            return None
+
+        return "\n\n".join(retrieved_text)
+
+    except Exception as error:
+
+        print("Retrieval Error:", str(error))
+        return None
+
+
+# ==========================================
+# 7. EXTRACT TEXT FROM HISTORY
 # ==========================================
 
 def extract_text(content):
@@ -47,7 +230,7 @@ def extract_text(content):
 
 
 # ==========================================
-# 3. COURSE QUESTION DETECTION
+# 8. COURSE QUESTION DETECTION
 # ==========================================
 
 def is_course_question(message):
@@ -68,7 +251,7 @@ def is_course_question(message):
 
 
 # ==========================================
-# 4. RECENT USER MESSAGES
+# 9. RECENT USER MESSAGES
 # ==========================================
 
 def get_recent_user_messages(history):
@@ -81,7 +264,9 @@ def get_recent_user_messages(history):
 
             if item.get("role") == "user":
 
-                content = extract_text(item.get("content"))
+                content = extract_text(
+                    item.get("content")
+                )
 
                 if content.strip():
                     recent_messages.append(content)
@@ -97,7 +282,7 @@ def get_recent_user_messages(history):
 
 
 # ==========================================
-# 5. DYNAMIC CONTEXT AND FILTERING
+# 10. OFFICIAL COURSE INFORMATION
 # ==========================================
 
 def build_relevant_context(message, history):
@@ -194,7 +379,7 @@ def build_relevant_context(message, history):
 
 
 # ==========================================
-# 6. NEUROBOT CHAT FUNCTION
+# 11. NEUROBOT CHAT FUNCTION
 # ==========================================
 
 def neurobot(message, history):
@@ -225,13 +410,13 @@ GROUNDING RULES:
   say it is not specified in the official information.
 - Do not use previous conversation messages as
   official evidence.
-- For non-course questions, you may use general knowledge.
-
-SOURCE RULES:
-- Mention the official source at the end of
-  course-related answers.
-- Use this format:
-  Source: Official Course Information (course_info.json)
+- For PDF-related questions, use the retrieved PDF
+  information when it is relevant.
+- Do not invent information from the PDF.
+- If the answer is not available in the PDF,
+  clearly say it is not found in the syllabus.
+- For unrelated general questions, you may use
+  general knowledge.
 
 PRIVACY:
 - Do not reveal private or confidential information.
@@ -285,6 +470,29 @@ PRIVACY:
 
 
     # ======================================
+    # RAG: RETRIEVE PDF INFORMATION
+    # ======================================
+
+    retrieved_context = retrieve_relevant_chunks(message)
+
+    if retrieved_context:
+
+        rag_message = (
+            "RETRIEVED INFORMATION FROM OFFICIAL SYLLABUS PDF:\n\n"
+            + retrieved_context
+            + "\n\nUse this retrieved information when relevant "
+            "to answer the student's question. "
+            "Do not invent facts that are not in this context. "
+            "Mention the source as: Source: syllabus.pdf"
+        )
+
+        messages.append({
+            "role": "system",
+            "content": rag_message
+        })
+
+
+    # ======================================
     # CONVERSATION HISTORY
     # ======================================
 
@@ -294,7 +502,9 @@ PRIVACY:
 
             role = item.get("role")
 
-            content = extract_text(item.get("content"))
+            content = extract_text(
+                item.get("content")
+            )
 
             if role in ["user", "assistant"] and content.strip():
 
@@ -323,7 +533,7 @@ PRIVACY:
 
 
     # ======================================
-    # CURRENT MESSAGE
+    # CURRENT USER MESSAGE
     # ======================================
 
     messages.append({
@@ -353,7 +563,7 @@ PRIVACY:
 
 
 # ==========================================
-# 7. GRADIO INTERFACE
+# 12. GRADIO INTERFACE
 # ==========================================
 
 demo = gr.ChatInterface(
@@ -364,7 +574,7 @@ demo = gr.ChatInterface(
 
 
 # ==========================================
-# 8. START NEUROBOT ON RENDER
+# 13. START NEUROBOT ON RENDER
 # ==========================================
 
 if __name__ == "__main__":
