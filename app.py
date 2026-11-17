@@ -3,6 +3,8 @@ import os
 import json
 import gradio as gr
 from groq import Groq
+import fitz
+from sentence_transformers import SentenceTransformer
 
 
 # ==========================================
