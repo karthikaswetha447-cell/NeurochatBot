@@ -5,7 +5,10 @@ import gradio as gr
 from groq import Groq
 
 
-# GROQ API CONNECTION
+# ==========================================
+# 1. GROQ API CONNECTION
+# ==========================================
+
 client = Groq(
     api_key=os.environ["GROQ_API_KEY"]
 )
@@ -13,20 +16,26 @@ client = Groq(
 model_name = "openai/gpt-oss-20b"
 
 
-# EXTRACT TEXT FROM CONVERSATION HISTORY
+# ==========================================
+# 2. EXTRACT TEXT FROM CONVERSATION HISTORY
+# ==========================================
+
 def extract_text(content):
 
     if isinstance(content, str):
         return content
 
     if isinstance(content, list):
+
         text_parts = []
 
         for block in content:
+
             if isinstance(block, str):
                 text_parts.append(block)
 
             elif isinstance(block, dict):
+
                 if block.get("type") == "text":
                     text_parts.append(block.get("text", ""))
 
@@ -35,7 +44,10 @@ def extract_text(content):
     return ""
 
 
-# CHECK WHETHER A MESSAGE IS COURSE-RELATED
+# ==========================================
+# 3. CHECK COURSE-RELATED QUESTIONS
+# ==========================================
+
 def is_course_question(message):
 
     keywords = [
@@ -53,7 +65,10 @@ def is_course_question(message):
     return any(word in question for word in keywords)
 
 
-# GET RECENT USER MESSAGES FROM HISTORY
+# ==========================================
+# 4. GET RECENT USER MESSAGES
+# ==========================================
+
 def get_recent_user_messages(history):
 
     recent_messages = []
@@ -63,6 +78,7 @@ def get_recent_user_messages(history):
         if isinstance(item, dict):
 
             if item.get("role") == "user":
+
                 content = extract_text(item.get("content"))
 
                 if content.strip():
@@ -78,15 +94,18 @@ def get_recent_user_messages(history):
     return recent_messages[-4:]
 
 
-# DYNAMIC CONTEXT + CONTEXT FILTERING + GROUNDING
+# ==========================================
+# 5. DYNAMIC CONTEXT + CONTEXT FILTERING
+# ==========================================
+
 def build_relevant_context(message, history):
 
     recent_messages = get_recent_user_messages(history)
 
-    # CHECK CURRENT QUESTION AND RECENT CONVERSATION
     course_related = is_course_question(message)
 
     if not course_related:
+
         course_related = any(
             is_course_question(old_message)
             for old_message in recent_messages
@@ -97,7 +116,19 @@ def build_relevant_context(message, history):
 
     try:
 
-        with open("course_info.json", "r", encoding="utf-8") as file:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        course_info_path = os.path.join(
+            base_dir,
+            "course_info.json"
+        )
+
+        with open(
+            course_info_path,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
             course_data = json.load(file)
 
         question = message.lower()
@@ -142,8 +173,9 @@ def build_relevant_context(message, history):
                 "course_duration": course_data.get("course_duration")
             }
 
-        # FOLLOW-UP OR OTHER COURSE QUESTIONS
+        # OTHER COURSE QUESTIONS
         else:
+
             relevant_data = course_data
 
         return {
@@ -163,12 +195,15 @@ def build_relevant_context(message, history):
         }
 
 
-# MAIN NEUROBOT FUNCTION
+# ==========================================
+# 6. MAIN NEUROBOT FUNCTION
+# ==========================================
+
 def neurobot(message, history):
 
     messages = []
 
-    # SYSTEM CONTEXT + GROUNDING RULES
+    # SYSTEM CONTEXT
     system_prompt = """
 You are NeuroBot, an AI assistant created by NeuroGen AI Academy.
 
@@ -217,12 +252,15 @@ PRIVACY:
         "content": system_prompt
     })
 
-    # LOAD OFFICIAL COURSE SOURCE
+
+    # ======================================
+    # LOAD OFFICIAL COURSE INFORMATION
+    # ======================================
+
     grounding_context = build_relevant_context(message, history)
 
     if grounding_context is not None:
 
-        # STOP IF OFFICIAL SOURCE IS UNAVAILABLE
         if grounding_context["status"] == "error":
 
             return (
@@ -254,12 +292,17 @@ PRIVACY:
             "content": source_message
         })
 
+
+    # ======================================
     # CONVERSATION HISTORY
+    # ======================================
+
     for item in history or []:
 
         if isinstance(item, dict):
 
             role = item.get("role")
+
             content = extract_text(item.get("content"))
 
             if role in ["user", "assistant"] and content.strip():
@@ -287,13 +330,21 @@ PRIVACY:
                     "content": assistant_message
                 })
 
+
+    # ======================================
     # CURRENT USER MESSAGE
+    # ======================================
+
     messages.append({
         "role": "user",
         "content": message
     })
 
+
+    # ======================================
     # SEND REQUEST TO GROQ
+    # ======================================
+
     try:
 
         response = client.chat.completions.create(
@@ -313,7 +364,10 @@ PRIVACY:
         )
 
 
-# GRADIO CHAT INTERFACE
+# ==========================================
+# 7. GRADIO CHAT INTERFACE
+# ==========================================
+
 demo = gr.ChatInterface(
     fn=neurobot,
     title="🤖 NeuroBot",
@@ -321,9 +375,33 @@ demo = gr.ChatInterface(
 )
 
 
-# LAUNCH APPLICATION
+# ==========================================
+# 8. LAUNCH APPLICATION + TEST PDF
+# ==========================================
+
 if __name__ == "__main__":
 
+    print("\n====================================")
+    print("NEUROBOT STARTING")
+    print("====================================")
+
+    # Run PDF test during Render startup
+    try:
+
+        print("\n========== STARTING PDF TEST ==========")
+
+        from test_pdf import test_pdf
+
+        test_pdf()
+
+        print("\n========== PDF TEST COMPLETED ==========")
+
+    except Exception as e:
+
+        print("\nPDF TEST COULD NOT RUN:", str(e))
+
+
+    # Start Gradio application
     demo.launch(
         server_name="0.0.0.0",
         server_port=int(os.environ.get("PORT", 10000))
