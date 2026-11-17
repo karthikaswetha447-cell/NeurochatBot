@@ -1,27 +1,80 @@
+
 import os
 import gradio as gr
 from groq import Groq
 
+# 1. Connect to Groq
 client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
+# 2. Select the AI model
 model_name = "openai/gpt-oss-20b"
 
+
+# 3. Main chatbot function
 def neurobot(message, history):
+
+    # System instructions
     messages = [
         {
             "role": "system",
-            "content": "You are NeuroBot, a friendly AI assistant created by NeuroGen AI Academy. Answer clearly and helpfully."
+            "content": (
+                "You are NeuroBot, a friendly AI assistant "
+                "created by NeuroGen AI Academy. "
+                "Answer clearly and helpfully. "
+                "Always use previous conversation history "
+                "to understand follow-up questions. "
+                "If the user says 'it', 'its', 'they' or "
+                "'that', use the previous conversation "
+                "to identify the correct topic."
+            )
         }
     ]
 
+    # 4. Add previous conversation history
     for item in history or []:
-        if isinstance(item, dict):
-            role = item.get("role")
-            content = item.get("content")
 
-            if role in ["user", "assistant"] and isinstance(content, str):
-                messages.append({
-                    "role": role,
+        role = item.get("role")
+        content = item.get("content")
+
+        if role in ["user", "assistant"] and isinstance(content, str):
+
+            messages.append({
+                "role": role,
+                "content": content
+            })
+
+    # 5. Add current user question
+    messages.append({
+        "role": "user",
+        "content": message
+    })
+
+    # 6. Send messages to Groq
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=messages
+    )
+
+    # 7. Return chatbot response
+    return response.choices[0].message.content
+
+
+# 8. Create Gradio interface
+demo = gr.ChatInterface(
+    fn=neurobot,
+    title="🤖 NeuroBot",
+    description="Your AI Assistant | Powered by NeuroGen AI Academy",
+    type="messages"
+)
+
+
+# 9. Launch chatbot
+if __name__ == "__main__":
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=int(os.environ.get("PORT", 7860))
+    )
+
                     "content": content
                 })
 
