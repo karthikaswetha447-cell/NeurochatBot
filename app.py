@@ -197,7 +197,13 @@ def build_relevant_context(message, history):
 # 6. NEUROBOT CHAT FUNCTION
 # ==========================================
 
-def neurobot(message, history, pasted_text):
+def neurobot(
+    message,
+    history,
+    temperature,
+    max_output_tokens,
+    top_p
+):
 
     messages = []
 
@@ -215,17 +221,6 @@ ANSWERING STYLE:
 - Use examples when helpful.
 - Use short paragraphs.
 - Answer the user's actual question.
-
-TEXT FILTERING RULES:
-- If the user provides pasted text, use that text
-  to answer their question.
-- Filter only the relevant information.
-- Summarize important points when requested.
-- Extract names, dates, keywords and facts when requested.
-- Do not invent information.
-- If the requested information is missing,
-  clearly say it is not found in the provided text.
-- If no text is provided, answer normally.
 
 COURSE GROUNDING RULES:
 - For course-related questions, use only the official
@@ -249,27 +244,7 @@ PRIVACY:
 
 
     # ======================================
-    # 7. PASTED TEXT CONTEXT
-    # ======================================
-
-    if pasted_text and pasted_text.strip():
-
-        text_context = pasted_text[:20000]
-
-        messages.append({
-            "role": "system",
-            "content": (
-                "USER PROVIDED TEXT:\n\n"
-                + text_context
-                + "\n\nUse this text as the source "
-                "when the user asks you to filter, "
-                "extract, summarize or find information."
-            )
-        })
-
-
-    # ======================================
-    # 8. OFFICIAL COURSE INFORMATION
+    # 7. OFFICIAL COURSE INFORMATION
     # ======================================
 
     grounding_context = build_relevant_context(
@@ -310,7 +285,7 @@ PRIVACY:
 
 
     # ======================================
-    # 9. CONVERSATION HISTORY
+    # 8. CONVERSATION HISTORY
     # ======================================
 
     for item in history or []:
@@ -350,7 +325,7 @@ PRIVACY:
 
 
     # ======================================
-    # 10. CURRENT USER MESSAGE
+    # 9. CURRENT USER MESSAGE
     # ======================================
 
     messages.append({
@@ -360,14 +335,25 @@ PRIVACY:
 
 
     # ======================================
-    # 11. GROQ RESPONSE
+    # 10. GROQ RESPONSE WITH LLM PARAMETERS
     # ======================================
 
     try:
 
         response = client.chat.completions.create(
+
             model=model_name,
-            messages=messages
+
+            messages=messages,
+
+            # Controls response creativity
+            temperature=temperature,
+
+            # Controls maximum response length
+            max_completion_tokens=int(max_output_tokens),
+
+            # Controls token selection diversity
+            top_p=top_p
         )
 
         return response.choices[0].message.content
@@ -380,26 +366,51 @@ PRIVACY:
 
 
 # ==========================================
-# 12. GRADIO INTERFACE
+# 11. GRADIO INTERFACE
 # ==========================================
 
 demo = gr.ChatInterface(
+
     fn=neurobot,
+
     title="🤖 NeuroBot",
+
     description="Your AI Assistant | Powered by NeuroGen AI Academy",
+
     additional_inputs=[
-        gr.Textbox(
-            label="Paste Your Text Here",
-            placeholder="Paste your text or document content here...",
-            lines=8
+
+        gr.Slider(
+            minimum=0,
+            maximum=2,
+            value=0.7,
+            step=0.1,
+            label="Temperature"
+        ),
+
+        gr.Slider(
+            minimum=128,
+            maximum=4096,
+            value=1024,
+            step=128,
+            label="Max Output Tokens"
+        ),
+
+        gr.Slider(
+            minimum=0,
+            maximum=1,
+            value=1.0,
+            step=0.05,
+            label="Top-P"
         )
+
     ],
-    additional_inputs_accordion="Text Filtering"
+
+    additional_inputs_accordion="LLM Parameters"
 )
 
 
 # ==========================================
-# 13. START NEUROBOT ON RENDER
+# 12. START NEUROBOT ON RENDER
 # ==========================================
 
 if __name__ == "__main__":
