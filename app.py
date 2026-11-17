@@ -36,35 +36,55 @@ def extract_text(content):
     return ""
 
 
-# 4. Load Dynamic Context
-def load_dynamic_context():
+# 4. Context Filtering
+def build_relevant_context(message):
 
     try:
         with open("course_info.json", "r", encoding="utf-8") as file:
-
             course_data = json.load(file)
 
+    except (FileNotFoundError, json.JSONDecodeError) as error:
+
+        print("Course information error:", error)
+        return ""
+
+    question = message.lower()
+
+    # Check whether the user asks about course fees
+    fee_keywords = [
+        "fee", "fees", "price", "cost",
+        "how much", "amount", "payment"
+    ]
+
+    if any(word in question for word in fee_keywords):
+
         return f"""
-CURRENT COURSE INFORMATION:
+RELEVANT INFORMATION FOR THIS QUESTION:
 
 Course Name: {course_data['course_name']}
 Current Course Fee: {course_data['currency']} {course_data['course_fee']}
 Last Updated: {course_data['updated_on']}
 
-IMPORTANT:
-- Always use this information for course-related questions.
-- Do not provide an outdated course fee.
-- If the requested information is unavailable, say so.
+Use this current information to answer the fee question.
+Do not use an outdated fee.
 """
 
-    except (FileNotFoundError, json.JSONDecodeError, KeyError) as error:
+    # Check whether the user asks about the course name
+    course_keywords = [
+        "course name", "which course",
+        "course title", "what course"
+    ]
 
-        print("Dynamic Context Error:", error)
+    if any(word in question for word in course_keywords):
 
-        return """
-The current course information is unavailable.
-Do not guess the course fee or other current details.
+        return f"""
+RELEVANT INFORMATION:
+
+Course Name: {course_data['course_name']}
 """
+
+    # No relevant course information needed
+    return ""
 
 
 # 5. Main chatbot function
@@ -79,8 +99,10 @@ You are NeuroBot, a friendly AI assistant created by NeuroGen AI Academy.
 
 CONVERSATION RULES:
 1. Always understand the current question using previous conversation.
-2. If the user asks "What are its types?", identify the subject from previous messages.
-3. Understand words like it, its, they, them, this and that using conversation history.
+2. If the user asks "What are its types?",
+   identify the subject from previous messages.
+3. Understand words like it, its, they, them,
+   this and that using conversation history.
 4. Continue the previous topic naturally.
 5. Do not ask users to repeat information already provided.
 6. If context is genuinely unclear, ask a clarification question.
@@ -93,11 +115,15 @@ RESPONSE STYLE:
         }
     ]
 
-    # 6. Add Dynamic Context
-    messages.append({
-        "role": "system",
-        "content": load_dynamic_context()
-    })
+    # 6. Add only relevant Dynamic Context
+    relevant_context = build_relevant_context(message)
+
+    if relevant_context:
+
+        messages.append({
+            "role": "system",
+            "content": relevant_context
+        })
 
     # 7. Read previous conversation history
     for item in history or []:
@@ -140,7 +166,7 @@ RESPONSE STYLE:
         "content": message
     })
 
-    # 9. Send complete context to Groq
+    # 9. Send information to Groq
     response = client.chat.completions.create(
         model=model_name,
         messages=messages
