@@ -1,5 +1,6 @@
 
 import os
+import json
 import gradio as gr
 from groq import Groq
 
@@ -35,48 +36,88 @@ def extract_text(content):
     return ""
 
 
-# 4. Main chatbot function
+# 4. Load Dynamic Context
+def load_dynamic_context():
+
+    try:
+        with open("course_info.json", "r", encoding="utf-8") as file:
+
+            course_data = json.load(file)
+
+        return f"""
+CURRENT COURSE INFORMATION:
+
+Course Name: {course_data['course_name']}
+Current Course Fee: {course_data['currency']} {course_data['course_fee']}
+Last Updated: {course_data['updated_on']}
+
+IMPORTANT:
+- Always use this information for course-related questions.
+- Do not provide an outdated course fee.
+- If the requested information is unavailable, say so.
+"""
+
+    except (FileNotFoundError, json.JSONDecodeError, KeyError) as error:
+
+        print("Dynamic Context Error:", error)
+
+        return """
+The current course information is unavailable.
+Do not guess the course fee or other current details.
+"""
+
+
+# 5. Main chatbot function
 def neurobot(message, history):
 
+    # System instructions
     messages = [
         {
             "role": "system",
             "content": """
 You are NeuroBot, a friendly AI assistant created by NeuroGen AI Academy.
 
-Always use previous conversation history to understand
-the user's current question.
+CONVERSATION RULES:
+1. Always understand the current question using previous conversation.
+2. If the user asks "What are its types?", identify the subject from previous messages.
+3. Understand words like it, its, they, them, this and that using conversation history.
+4. Continue the previous topic naturally.
+5. Do not ask users to repeat information already provided.
+6. If context is genuinely unclear, ask a clarification question.
 
-Understand words like:
-it, its, they, them, this, that and those.
-
-If the user asks "What are its types?",
-identify the subject from previous messages.
-
-Continue the previous topic naturally.
-Do not ask users to repeat information already provided.
-
-Give clear, beginner-friendly answers in simple English.
+RESPONSE STYLE:
+- Give clear and beginner-friendly explanations.
+- Use simple English.
+- Provide practical examples.
 """
         }
     ]
 
-    # 5. Read previous conversation
+    # 6. Add Dynamic Context
+    messages.append({
+        "role": "system",
+        "content": load_dynamic_context()
+    })
+
+    # 7. Read previous conversation history
     for item in history or []:
 
+        # Modern Gradio message format
         if isinstance(item, dict):
 
             role = item.get("role")
             content = extract_text(item.get("content"))
 
-            if role in ["user", "assistant"] and content.strip():
-
+            if (
+                role in ["user", "assistant"]
+                and content.strip()
+            ):
                 messages.append({
                     "role": role,
                     "content": content
                 })
 
-        # Compatibility with older tuple history
+        # Older Gradio tuple/list format
         elif isinstance(item, (list, tuple)) and len(item) == 2:
 
             user_message, assistant_message = item
@@ -93,23 +134,23 @@ Give clear, beginner-friendly answers in simple English.
                     "content": assistant_message
                 })
 
-    # 6. Add current question
+    # 8. Add current user question
     messages.append({
         "role": "user",
         "content": message
     })
 
-    # 7. Send conversation to Groq
+    # 9. Send complete context to Groq
     response = client.chat.completions.create(
         model=model_name,
         messages=messages
     )
 
-    # 8. Return answer
+    # 10. Return AI response
     return response.choices[0].message.content
 
 
-# 9. Create Gradio interface
+# 11. Create Gradio interface
 demo = gr.ChatInterface(
     fn=neurobot,
     title="🤖 NeuroBot",
@@ -117,7 +158,7 @@ demo = gr.ChatInterface(
 )
 
 
-# 10. Launch application
+# 12. Launch application
 if __name__ == "__main__":
 
     demo.launch(
