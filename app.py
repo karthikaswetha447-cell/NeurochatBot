@@ -94,3 +94,67 @@ def get_recent_user_messages(history):
                 recent_messages.append(user_message)
 
     return recent_messages[-4:]
+
+
+# ==========================================
+# 5. OFFICIAL COURSE INFORMATION
+# ==========================================
+
+def build_relevant_context(message, history):
+
+    recent_messages = get_recent_user_messages(history)
+
+    course_related = is_course_question(message)
+
+    if not course_related:
+
+        course_related = any(
+            is_course_question(old_message)
+            for old_message in recent_messages
+        )
+
+    if not course_related:
+        return None
+
+    try:
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        course_info_path = os.path.join(
+            base_dir,
+            "course_info.json"
+        )
+
+        with open(
+            course_info_path,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
+            course_data = json.load(file)
+
+        question = message.lower()
+
+        if any(word in question for word in [
+            "fee", "fees", "price", "cost",
+            "payment", "amount"
+        ]):
+
+            relevant_data = {
+                "course_name": course_data.get("course_name"),
+                "course_fee": course_data.get("course_fee"),
+                "currency": course_data.get("currency"),
+                "updated_on": course_data.get("updated_on")
+            }
+
+        elif any(word in question for word in [
+            "certificate", "certificates",
+            "viva", "issue date", "eligibility"
+        ]):
+
+            relevant_data = {
+                "course_name": course_data.get("course_name"),
+                "certificate": course_data.get("certificate"),
+                "certificate_eligibility": course_data.get(
+                    "certificate_eligibility"
+                ),
