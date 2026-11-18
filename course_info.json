@@ -770,7 +770,44 @@ Relevance, Accuracy, Completeness, Faithfulness (stays true to the context), Res
 
 
 # ==========================================
-# 12. GRADIO INTERFACE
+# 12. CLICKABLE PROMPT EXAMPLES (click = set options + send)
+# ==========================================
+
+def _example(message, role="Default NeuroBot", technique="Zero-shot",
+             output_format="Normal text", temperature=0.7):
+    # Order must match the additional_inputs of the chat:
+    # name, level, interests, goal, use_profile, use_history, role,
+    # technique, format, temperature, max_tokens, top_p, freq, pres,
+    # show_classification, show_evaluation
+    return [
+        message, "", "Beginner", "", "",
+        True, True, role, technique, output_format,
+        temperature, 1024, 1.0, 0.0, 0.0,
+        False, True,
+    ]
+
+
+PROMPT_EXAMPLES = [
+    # Prompting techniques
+    _example("What is overfitting in machine learning?", technique="Zero-shot"),
+    _example("What is overfitting in machine learning?", technique="Few-shot"),
+    _example("A course costs 12000 rupees with 18% GST. What is the total?", technique="Chain-of-Thought"),
+    _example("How do I start learning AI from zero?", technique="Step-by-Step Plan"),
+    _example("What is a neural network?", technique="Constraint-based (concise)"),
+    # Structured outputs
+    _example("Explain supervised vs unsupervised learning", output_format="JSON"),
+    _example("Compare Python, Java and JavaScript for beginners", output_format="Table"),
+    # Role-based instructions
+    _example("Explain what an API is", role="Friendly Teacher"),
+    _example("How can I get my first AI job?", role="Career Mentor"),
+    _example("Tell me about Python lists", role="Technical Interviewer"),
+    _example("What is the course fee?", role="Student Support Agent"),
+    _example("When will I receive my certificate?", role="Student Support Agent"),
+]
+
+
+# ==========================================
+# 13. GRADIO INTERFACE
 # ==========================================
 
 with gr.Blocks(title="NeuroBot | NeuroGen AI Academy") as demo:
@@ -808,7 +845,11 @@ with gr.Blocks(title="NeuroBot | NeuroGen AI Academy") as demo:
     with gr.Tabs():
 
         with gr.Tab("💬 Chat"):
-            gr.ChatInterface(
+            gr.Markdown(
+                "### ⚡ Click any prompt below: it sets the role, technique and "
+                "format automatically and sends the message."
+            )
+            chat_kwargs = dict(
                 fn=neurobot,
                 additional_inputs=[
                     p_name, p_level, p_interests, p_goal,
@@ -816,7 +857,15 @@ with gr.Blocks(title="NeuroBot | NeuroGen AI Academy") as demo:
                     temperature, max_tokens, top_p, freq_pen, pres_pen,
                     show_class, show_eval,
                 ],
+                examples=PROMPT_EXAMPLES,
+                examples_per_page=12,
+                cache_examples=False,
             )
+            try:
+                # Newer Gradio: clicking an example sends it immediately
+                gr.ChatInterface(run_examples_on_click=True, **chat_kwargs)
+            except TypeError:
+                gr.ChatInterface(**chat_kwargs)
 
         with gr.Tab("🧪 Context Comparison"):
             gr.Markdown("Compare a follow-up answer **without** and **with** context (profile + history + role).")
@@ -863,7 +912,7 @@ with gr.Blocks(title="NeuroBot | NeuroGen AI Academy") as demo:
 
 
 # ==========================================
-# 13. START NEUROBOT ON RENDER
+# 14. START NEUROBOT ON RENDER
 # ==========================================
 
 if __name__ == "__main__":
