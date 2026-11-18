@@ -120,9 +120,19 @@ def build_relevant_context(message, history):
         return None
 
     try:
+        # Look for course_info.json next to app.py, then in the working folder
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        path = os.path.join(base_dir, "course_info.json")
-        with open(path, "r", encoding="utf-8") as f:
+        candidates = [
+            os.path.join(base_dir, "course_info.json"),
+            os.path.join(os.getcwd(), "course_info.json"),
+        ]
+        path = next((p for p in candidates if os.path.isfile(p)), None)
+        if path is None:
+            raise FileNotFoundError(
+                "course_info.json was not found next to app.py. "
+                "Upload it to the same GitHub folder as app.py (exact lowercase name)."
+            )
+        with open(path, "r", encoding="utf-8-sig") as f:
             course_data = json.load(f)
 
         q = message.lower()
@@ -164,7 +174,8 @@ def build_relevant_context(message, history):
     except Exception as error:
         print("Grounding Source Error:", str(error))
         return {"status": "error", "data": None, "source": "course_info.json",
-                "branch": "error", "all_fields": [], "included_fields": []}
+                "branch": "error", "all_fields": [], "included_fields": [],
+                "error": safe_error(error)}
 
 
 # ==========================================
@@ -381,22 +392,29 @@ def assemble_prompt(message, history, profile=None, use_profile=True,
         grounding = build_relevant_context(message, history)
         if grounding is not None:
             if grounding["status"] == "error":
-                return None, None, (
-                    "Sorry, I cannot access the official course information "
-                    "right now. Please try again later."
-                ), None
-            official_data = grounding["data"]
-            messages.append({
-                "role": "system",
-                "content": (
-                    "OFFICIAL COURSE INFORMATION:\n"
-                    + json.dumps(official_data, ensure_ascii=False, indent=2)
-                    + "\n\nSOURCE: " + grounding["source"]
-                    + "\n\nUse this information as the only authority for "
-                    "course-related facts. If a requested value is missing or "
-                    "null, say it is not specified. Do not guess. Mention the source."
-                ),
-            })
+                # Do not block the chat: tell the model the official data is unavailable
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "OFFICIAL COURSE INFORMATION IS CURRENTLY UNAVAILABLE. "
+                        "Do not state any course fee, date, duration, certificate rule "
+                        "or eligibility. Tell the student that the official course "
+                        "information could not be loaded and to contact NeuroGen AI Academy."
+                    ),
+                })
+            else:
+                official_data = grounding["data"]
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "OFFICIAL COURSE INFORMATION:\n"
+                        + json.dumps(official_data, ensure_ascii=False, indent=2)
+                        + "\n\nSOURCE: " + grounding["source"]
+                        + "\n\nUse this information as the only authority for "
+                        "course-related facts. If a requested value is missing or "
+                        "null, say it is not specified. Do not guess. Mention the source."
+                    ),
+                })
 
     used_history = []
     total_history = len(history_to_messages(history, limit=None))
@@ -709,6 +727,8 @@ def render_ctx_dynamic(trace):
     if g is None:
         return ("The question (and the last 4 user messages) did not match any course keyword, "
                 "so **no course data was selected**. The model answers from general knowledge.")
+    if g["status"] == "error":
+        return "Course keywords matched, but the official data file could not be loaded. See the Grounding section."
     return (
         "The question (or a recent user message) matched course keywords, so course data was "
         "selected dynamically.\n\n"
@@ -746,6 +766,8 @@ def render_ctx_ground(trace):
     g = trace["grounding"]
     if g is None:
         return "No official information was used for this question."
+    if g["status"] == "error":
+        return f"❌ **Official course information could not be loaded.**\n\n**Reason:** {g.get('error', 'unknown')}"
     return (
         f"**Source:** {g['source']}\n\n"
         "**Official information sent to the model:**\n\n"
