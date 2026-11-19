@@ -1,0 +1,34 @@
+{
+  "sources": [
+    {
+      "title": "What is Artificial Intelligence?",
+      "publisher": "NeuroGen AI Academy (sample entry: replace with your approved content)",
+      "url": "",
+      "text": "Artificial Intelligence (AI) is the field of computer science that builds systems able to perform tasks that normally need human intelligence, such as understanding language, recognising images and making decisions. Narrow AI is designed for one specific task, for example a spam filter or a recommendation engine. General AI, which could perform any intellectual task a human can, is still theoretical."
+    },
+    {
+      "title": "What is Machine Learning?",
+      "publisher": "NeuroGen AI Academy (sample entry: replace with your approved content)",
+      "url": "",
+      "text": "Machine learning is a way for computers to learn patterns from data instead of being given fixed rules. In supervised learning the model learns from labelled examples, such as emails marked spam or not spam. In unsupervised learning the model looks for structure in data that has no labels, such as grouping customers with similar behaviour."
+    },
+    {
+      "title": "Features and labels in a dataset",
+      "publisher": "NeuroGen AI Academy (sample entry: replace with your approved content)",
+      "url": "",
+      "text": "A dataset is a collection of data. Each row is one record and each column is a feature, which is an input variable that describes the record. The label is the target output that the model should predict. Using the label as a feature causes data leakage and gives misleading evaluation results."
+    },
+    {
+      "title": "Overfitting and underfitting",
+      "publisher": "NeuroGen AI Academy (sample entry: replace with your approved content)",
+      "url": "",
+      "text": "Overfitting happens when a model memorises the training data, including its noise, and then performs poorly on new data. Underfitting happens when a model is too simple to learn the pattern in the data. Common ways to reduce overfitting are using more training data, simplifying the model, and checking performance on a separate test set."
+    },
+    {
+      "title": "Using AI chatbots responsibly",
+      "publisher": "NeuroGen AI Academy (sample entry: replace with your approved content)",
+      "url": "",
+      "text": "AI chatbots can produce confident answers that are wrong, which is called hallucination. Important facts such as fees, dates and rules should be checked against an official source. Students should not share private or confidential information with a chatbot."
+    }
+  ]
+}
