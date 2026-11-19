@@ -1,10 +1,12 @@
 {
   "course_name": "Applied AI Foundation",
-  "course_fee": 12000,
+  "course_fee": 15000,
   "currency": "INR",
-  "updated_on": "2026-11-18",
-  "course_duration": "8 weeks, 3 classes per week",
+  "updated_on": "2026-11-01",
+  "course_duration": "8 weeks, 3 live classes per week (about 48 hours)",
   "certificate": "Certificate of Completion issued by NeuroGen AI Academy",
-  "certificate_eligibility": "Attend at least 80% of classes and pass the final viva",
-  "certificate_issue_date": "Within 15 days after the viva is completed"
+  "certificate_eligibility": "At least 75% class attendance and a passed final viva",
+  "certificate_issue_date": "Within 15 working days after the viva result",
+  "mode": "Online live classes",
+  "contact": "support@neurogen.example"
 }
