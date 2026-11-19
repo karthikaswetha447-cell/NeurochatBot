@@ -2052,7 +2052,7 @@ with gr.Blocks(title="NeuroBot | NeuroGen AI Academy", theme=gr.themes.Soft(), c
 
     gr.HTML(
         "<div class='nb-header'><h1>🤖 NeuroBot</h1>"
-        "<p>NeuroGen AI Academy | AI chatbot with RAG, a live context, prompt and evaluation dashboard</p></div>"
+        "<p>NeuroGen AI Academy | </p></div>"
     )
 
     with gr.Tabs():
