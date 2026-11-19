@@ -1,0 +1,60 @@
+NEUROBOT — DOCUMENT FILTERING / RAG EXPLANATION
+===============================================
+
+IMPORTANT DISTINCTION
+--------------------
+NeuroBot has two independent sources of context:
+
+A. course_info.json filter
+   This is academy-specific. It selects fee, certificate, duration or other course
+   fields when the conversation is about NeuroGen AI Academy course information.
+
+B. Uploaded-document RAG filter (the feature requested here)
+   This is document-generic. Upload any supported document, regardless of subject.
+   The application extracts text, splits a long document into overlapping chunks,
+   compares each chunk with the student's CURRENT QUESTION, and passes only the
+   top relevant passages to the LLM. This is not restricted to course questions.
+
+EXAMPLE
+-------
+Uploaded 30-page document:
+  Chunk 1: Artificial Intelligence introduction
+  Chunk 2: Generative AI
+  Chunk 3: Large Language Models
+  Chunk 4: Tokenization
+  Chunk 5: Embeddings
+  ...
+
+Current question: "What is tokenization? Give an example."
+  1. Extract question terms (ignoring filler words such as "what" and "example").
+  2. Rank every document chunk using BM25-style lexical relevance.
+  3. Select the highest-ranked matching chunk(s), up to RAG_TOP_K (4).
+  4. Add those excerpts and source filename to the LLM prompt.
+  5. Instruct the LLM to answer from those excerpts and not invent document facts.
+
+FOLLOW-UP EXAMPLE
+-----------------
+Previous user question: "Explain embeddings."
+Current follow-up: "Give me an example."
+Retrieval query includes both messages, so the search retains the topic "embeddings".
+
+HOW TO VERIFY
+-------------
+After upload, ask a question found in the file. Open Context > RAG. It displays:
+- retrieval query (including prior question when the current question is a follow-up)
+- number of document chunks searched
+- selected source filename and chunk number
+- matched terms and retrieval score
+- short excerpt supplied to the LLM
+
+CURRENT LIMITATIONS
+------------------
+- BM25-style retrieval is word-based. It is not a neural embedding model and not a
+  vector database. A later semantic-search upgrade can add multilingual embeddings
+  and a vector index if needed.
+- Scanned PDFs that contain only images are not OCR processed.
+- Uploaded files are held in Gradio session state, not permanently saved to a DB.
+- The profile and conversation history are session-based; there is no student login
+  or permanent profile database in this build.
+- Model responses can still be wrong. Verify important official academy details.
+- Uploaded files are treated as user-supplied reference material, not as independently verified official sources. The app does not browse the public web to confirm facts.
