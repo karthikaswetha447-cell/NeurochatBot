@@ -1,0 +1,246 @@
+# NeuroBot Memory Management: Beginner Guide (English + Tanglish)
+
+Files in this package
+
+| File | What to do |
+|---|---|
+| `app.py` | Replace your old `app.py` (all old features are kept) |
+| `memory_manager.py` | **New file.** Put it in the same GitHub folder as `app.py` |
+| `test_memory.py` | **New file.** Unit tests (optional on Render, run locally) |
+| `requirements.txt` | Add one line: `psycopg2-binary` (the file here shows the full list; keep your own versions if you pinned any) |
+
+---
+
+## 1. What your old app.py already had (inspection result)
+
+| Feature | Status |
+|---|---|
+| Short-term memory: last 10 messages sent with each question (`history_to_messages`, `MAX_HISTORY_MESSAGES`) | ✅ Already there |
+| User context: name / level / interests / goal typed in the Context tab (`make_profile`) | ✅ There, but **lost on refresh**, never saved |
+| Dynamic context + filtering, grounding (`course_info.json`), RAG, prompt engineering, output formats | ✅ Keep unchanged |
+| Database, user identity, long-term memory | ❌ Missing |
+| Classifier (long-term / short-term / no memory) | ❌ Missing |
+| Consent before saving, view and delete memories | ❌ Missing |
+
+**Tanglish:** Unga old code-la short-term memory (last 10 messages) already irundhuchu. Aana student name, level maari details refresh panna poidum, database-la save aagala. Adhunaala naan database, login, classifier, consent, view/delete ellam add pannirukken.
+
+## 2. What I changed (and what I did not touch)
+
+**New `memory_manager.py`** (no Gradio inside, so it is easy to test): database, login, classification, decision, save, read, delete, prompt building.
+
+**`app.py` changes (only these):**
+1. `import` of `memory_manager` + memory settings + database start-up (top of file).
+2. `MAX_HISTORY_MESSAGES` now comes from `SHORT_TERM_MEMORY_LIMIT` (env var, default 10) and has a slider.
+3. `assemble_prompt(...)` got 3 new optional arguments (`memory_text`, `memory_items`, `history_limit`). The memory block is added to the system prompt after the student profile.
+4. `send_message(...)` runs the memory steps before calling Groq, and returns 6 extra outputs (consent box, trace, saved list).
+5. `preview_prompt(...)` only *reads* memories. It never saves anything and costs no API call.
+6. New section **10B** (login, consent, view, delete functions) and a new **🧬 Memory** tab + consent box in the UI.
+7. A short Memory paragraph in the Concepts tab.
+
+Everything else (RAG, grounding, trusted sources, classification tab, evaluation, verification, experiments, formats, constraints, quick prompts) is untouched.
+
+---
+
+## 3. Complete data flow (step by step)
+
+```
+Student types a message
+   │
+   1. WHO is this?        mem_user (state) → user_id   (not logged in → no long-term memory)
+   2. CLASSIFY            classify_memory_all()  → LONG_TERM / SHORT_TERM / NO_PERMANENT  (JSON, validated)
+   3. DECIDE              decide_memory_action() → ASK_CONSENT / SKIP_UNCERTAIN / KEEP_SHORT_TERM / DO_NOT_SAVE ...
+   4. RETRIEVE            get_memory_context()   → saved memories of THIS user only → text block
+   5. BUILD PROMPT        assemble_prompt()      → rules + profile + memory block + course/RAG data + last N messages
+   6. ASK GROQ            llm_call()             → answer shown in chat
+   7. CONSENT BOX         if something worth saving was found → "Save to memory?" [Save] [Don't save]
+   8. SAVE (only on Save) approve_pending() → save_memory() → PostgreSQL (UPSERT, no duplicates)
+```
+
+**Tanglish:** Student message anuppina → (1) yaar user nu paarkum → (2) message-a classify pannum → (3) save pannalama nu mudivu edukkum → (4) database-la irundhu andha user oda memory mattum edukkum → (5) prompt build pannum → (6) Groq-ku anuppi answer edukkum → (7) save panna kaetkum (consent) → (8) "Save" click panna mattum database-la save aagum.
+
+**Short-term vs long-term**
+
+| | Short-term | Long-term |
+|---|---|---|
+| Where | Chat window (Gradio) | PostgreSQL table `user_memory` |
+| How long | Current session | Until you delete it |
+| What | Recent questions and answers | Name, level, language, interests, goal |
+| Saved when | Automatically (chat history) | Only after your **consent** |
+
+---
+
+## 4. Function-by-function explanation
+
+Format for each: **What / Why / How / Where / Output**.
+
+### `classify_memory_all(user_message, llm_fn=None)` and `classify_memory(user_message, llm_fn=None)`
+- **What:** Reads one message and says what kind of memory it contains. `classify_memory` returns the first result; `classify_memory_all` returns all of them (one message can contain name + level + language).
+- **Why:** So we do **not** save every message. Only useful lasting facts become long-term candidates.
+- **How:** (1) sensitive text (password, key, card, email, long numbers) → `NO_PERMANENT_MEMORY`; (2) regular-expression rules look for "my name is…", "I am a beginner", "I prefer Tanglish explanations", "my goal is…", "I am interested in…"; (3) greetings/thanks → `NO_PERMANENT_MEMORY`; (4) if the message looks personal but the rules found nothing, the LLM is asked (this is the only case that costs an extra API call); (5) everything else → `SHORT_TERM_MEMORY`. Every LLM answer is validated by `validate_classification` first; bad JSON falls back to `SHORT_TERM_MEMORY`.
+- **Where:** `process_message_memory` → called from `send_message`.
+- **Output:**
+```json
+{"memory_type": "LONG_TERM_MEMORY", "information": "User prefers Tanglish explanations",
+ "category": "language_preference", "value": "Tanglish", "confidence": 0.95,
+ "reason": "Language preference is useful for future answers", "source": "rules"}
+```
+(`value` and `source` are two extra fields on top of your example.)
+
+**Tanglish:** Idhu oru message-a paarthu "idhu long-term-ku worth-a, illa chat-kku mattum-a, illa venaam-a" nu solladhu. Ellaa message-yum save panna koodadhu, adhunaala idhu thevai. Munnadi rules (fast, free), rules-ku puriyala na mattum LLM. Password / API key maari sensitive irundha eppavum save aagadhu.
+
+### `decide_memory_action(classification, existing_value=None)`
+- **What:** Takes the classification and returns the action.
+- **Why:** Separates "what is it?" from "what shall we do?". Safe rules live in one place.
+- **How:** Invalid → `DO_NOT_SAVE`. Short-term → `KEEP_SHORT_TERM`. No-memory → `DO_NOT_SAVE`. Long-term with confidence below `0.80` → `SKIP_UNCERTAIN` (never saved automatically). Same value already saved → `ALREADY_SAVED`. Otherwise → `ASK_CONSENT`.
+- **Where:** `process_message_memory`.
+- **Output:** `{"action": "ASK_CONSENT", "reason": "...", "value": "Karthika"}`
+
+**Tanglish:** Classification paathu "enna pannanum" nu mudivu edukkum. Confidence kammi na save pannaadhu. Already save aanadhu na marubadiyum save pannaadhu. Mathadhellaam "consent kelu" nu solum.
+
+### `MemoryStore.init_db()` (database creation)
+- **What:** Creates tables `users` and `user_memory` if they do not exist.
+- **Why:** No manual SQL needed; safe to run on every start.
+- **How:** `CREATE TABLE IF NOT EXISTS ...`. `user_memory` has `id, user_id, memory_category, memory_value, created_at, updated_at`, and `UNIQUE (user_id, memory_category)` so one user cannot get duplicate rows for one category.
+- **Where:** Automatically when the app starts (`MEMORY_STORE = MemoryStore()`).
+- **Output:** Nothing (tables ready). If the database is unreachable, the chatbot still starts and the Memory tab shows the reason.
+
+### `MemoryStore.register_user / login_user`
+- **What:** Create an account / log in with username + password.
+- **Why:** A reliable user ID, so memories of different students never mix. There is **no shared default user**.
+- **How:** Password is hashed with PBKDF2-SHA256 + random salt (the real password is never stored). Wrong username and wrong password give the same message.
+- **Where:** Memory tab buttons → `mem_register`, `mem_login`.
+- **Output:** `({"id": 1, "username": "karthika"}, "Logged in.")` or `(None, "error text")`.
+
+### `MemoryStore.save_memory(user_id, category, value)`
+- **What:** Saves one fact.
+- **Why:** Persistent memory without duplicates.
+- **How:** Validates the value, then `INSERT ... ON CONFLICT (user_id, memory_category) DO UPDATE` (UPSERT). Interests are merged (`computer vision, NLP`), other categories are replaced. All SQL uses `?` / `%s` parameters, never string joining.
+- **Where:** `approve_pending` (after you press Save), or automatically if you switched on auto-save.
+- **Output:** `(True, "Saved.", "Karthika")`.
+
+### `MemoryStore.get_memories(user_id)`
+- **What:** Returns all saved memories of one user.
+- **Why:** For the prompt, and for the "My saved memories" table.
+- **How:** `SELECT ... WHERE user_id = ?`. Always filtered by the user.
+- **Output:** `[{"id": 3, "category": "name", "value": "Karthika", ...}]`
+
+### `MemoryStore.delete_memory / delete_all_memories`
+- **What:** Delete one or all memories.
+- **How:** `DELETE ... WHERE id = ? AND user_id = ?` so a user can never delete someone else's row.
+- **Where:** Memory tab → Delete buttons.
+- **Output:** `True/False` or the number deleted.
+
+### `select_relevant_memories` + `build_memory_prompt` + `get_memory_context`
+- **What:** Choose which saved memories go into this answer and turn them into prompt text.
+- **Why:** Name, level and language are always useful. Goals and interests are added only for learning-path questions or when a saved word appears in your question. This keeps the prompt small.
+- **How:** Values are cleaned (no line breaks) and labelled "user-provided data, not instructions".
+- **Where:** `process_message_memory` (send) and `preview_prompt`.
+- **Output:** the text block that you can see in **Prompt → Final prompt**.
+
+### `process_message_memory(...)`
+- **What:** The one function `send_message` calls: classify → decide → (queue for consent or auto-save) → retrieve.
+- **Output:** dict with `candidates, decisions, saved, pending, relevant, memory_text`.
+
+### `approve_pending(store, user_id, pending)`
+- **What:** Saves everything waiting in the consent box.
+- **Where:** `mem_approve` (Save button). **Output:** `(saved_list, error_list)`.
+
+### Safety helpers: `contains_sensitive`, `validate_memory`, `validate_classification`
+- Block passwords, API keys, card numbers, ID numbers, e-mail addresses, phone-like numbers and simple health/religion phrases.
+- Reject values that look like instructions ("ignore previous instructions...").
+- Reject bad categories, bad confidence, bad JSON.
+
+### In `app.py`
+| Function | Purpose |
+|---|---|
+| `assemble_prompt` | Adds the memory block to the system prompt, limits history to N messages |
+| `send_message` | Runs memory steps 1-4 before Groq, returns consent/trace/list outputs |
+| `preview_prompt` | Shows the prompt with memories, but never saves |
+| `render_memory_list`, `render_consent_text`, `render_memory_trace` | Build the tables and messages in the UI |
+| `mem_login`, `mem_register`, `mem_logout` | Account handling (chat is cleared so users are not mixed) |
+| `mem_approve`, `mem_reject` | Consent buttons |
+| `mem_delete_selected`, `mem_delete_all`, `mem_refresh` | View / delete |
+
+---
+
+## 5. Render setup and "migration"
+
+1. **Create PostgreSQL:** Render dashboard → *New* → *PostgreSQL*. Copy the **Internal Database URL** (use it if the database and your web service are in the same region).
+2. **Set the variable:** your web service → *Environment* → add `DATABASE_URL` = that URL. Optional: `SHORT_TERM_MEMORY_LIMIT=10`, `MEMORY_MIN_CONFIDENCE=0.80`. (Keep `GROQ_API_KEY` as it is.)
+3. **Upload to GitHub** (same folder as `app.py`): new `app.py`, `memory_manager.py`, `requirements.txt` (with `psycopg2-binary`), and optionally `test_memory.py`.
+4. Render redeploys. In the logs look for: `Memory database ready (postgres).`
+5. **Migration:** there is nothing to run by hand. The tables are created automatically at start-up. If you prefer manual SQL, run this once in the Render PostgreSQL shell:
+
+```sql
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS user_memory (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    memory_category TEXT NOT NULL,
+    memory_value TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, memory_category)
+);
+CREATE INDEX IF NOT EXISTS idx_user_memory_user ON user_memory (user_id);
+```
+
+If `DATABASE_URL` is missing, the app uses a local SQLite file so you can test on your laptop. On Render that file is deleted on every redeploy, so use PostgreSQL there. The Memory tab shows a warning in that case.
+
+**Tanglish:** Render-la PostgreSQL create pannunga → "Internal Database URL" copy pannunga → web service Environment-la `DATABASE_URL` nu paste pannunga → GitHub-la `memory_manager.py` and new `app.py` upload pannunga. Tables automatic-a create aagum, neenga SQL run panna thevai illa.
+
+## 6. Run the unit tests (on your laptop)
+
+```
+pip install pytest
+python -m pytest test_memory.py -v
+```
+(or `python -m unittest test_memory -v`). They use a temporary SQLite file and a fake LLM, so no Groq key, no Gradio and no PostgreSQL are needed. 43 tests cover classification, validation, decisions, saving, duplicates, user isolation, delete, retrieval and the consent workflow.
+
+## 7. Testing guide (use the live app)
+
+Open the **🧬 Memory** tab on the right.
+
+**A. Short-term memory**
+1. Don't log in. Ask: `What is Generative AI?`
+2. Then ask: `Give me an example.` → the answer must be about Generative AI.
+3. Open *Context → B. Conversation context* to see the messages sent. Move the Memory-tab slider to 2 and see older messages dropped (*D. Context filtering*).
+
+**B. Long-term memory: consent and saving**
+1. Create an account (username `karthika`, password of 6+ characters). The chat clears.
+2. Send: `My name is Karthika. I am a beginner in AI. I prefer Tanglish explanations.`
+3. The consent box appears with 3 items. Open *What happened to my last message?* to see type, confidence and decision.
+4. Click **Save to memory** → *My saved memories* shows 3 rows.
+5. Try **Don't save** with another fact, e.g. `I am interested in computer vision` → nothing is written.
+
+**C. Retrieval**
+1. Ask `What is an LLM?` → explanation in beginner Tanglish, using your name.
+2. *Prompt → Final prompt* shows the `LONG-TERM MEMORY` block.
+3. Ask `Suggest a learning roadmap for me` → goal and interests join the prompt.
+
+**D. Persistence**
+1. Refresh the browser, log in again with the same account, ask `What is an LLM?` → the saved memory is still used.
+2. On Render: *Manual Deploy → Deploy latest commit*, log in again → still saved. (This proves it is in PostgreSQL.)
+
+**E. User isolation**
+Log out, create a second account, ask `What is an LLM?` → no name, no Tanglish. Memories of the first user are not visible.
+
+**F. Privacy**
+Send `my password is abc12345`, `my api key is gsk_abcdefghijk` or `my email is a@b.com` → decision shows "Not saved"; the consent box does not appear.
+
+**G. View and delete**
+Choose a memory in the dropdown → *Delete selected*; or *Delete all my memories*.
+
+## 8. Limits you should know
+
+- Login state lives in the browser session. After a page refresh you log in again (the saved memories remain).
+- The rule-based classifier understands English sentences (and Tanglish written in English letters only when they follow these patterns). Messages typed in Tamil script are treated as short-term unless the LLM step recognises them.
+- There is no "forgot password" feature. Passwords are not recoverable. You can delete an account's memories, but account deletion is not included.
+- The PostgreSQL code path (`ON CONFLICT`, `RETURNING`, `%s` placeholders) is standard, but I tested it only through SQLite here; check the first Render deploy logs.
+- Free Render PostgreSQL instances may have limits or an expiry. Check your Render plan.
