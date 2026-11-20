@@ -1,4 +1,4 @@
-gradio
+gradio<6
 groq
 pypdf
 python-docx
