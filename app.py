@@ -11,6 +11,12 @@ from datetime import date
 import gradio as gr
 from groq import Groq
 
+# --- NEW: memory management (see memory_manager.py, keep it next to app.py) ---
+from memory_manager import (
+    MemoryStore, CATEGORY_LABELS,
+    process_message_memory, approve_pending, get_memory_context, build_memory_prompt,
+)
+
 
 # ==========================================
 # 1. GROQ API CONNECTION
@@ -39,6 +45,30 @@ RAG_RELATIVE_CUTOFF = 0.40    # drop chunks scoring below 40% of the best chunk
 # variable RAG_ALLOWED_TYPES=.pdf  (default: all six types)
 _allowed = os.environ.get("RAG_ALLOWED_TYPES", ".txt,.md,.csv,.json,.pdf,.docx")
 RAG_FILE_TYPES = [("." + t.strip().lower().lstrip(".")) for t in _allowed.split(",") if t.strip()]
+
+# --- NEW: memory settings (set them in Render > Environment) ---
+#   DATABASE_URL            -> PostgreSQL connection string (Render gives you the "Internal Database URL")
+#                              If it is empty, a local SQLite file is used (good for testing only: Render
+#                              deletes local files on every redeploy).
+#   SHORT_TERM_MEMORY_LIMIT -> how many latest chat messages are sent to the model (default 10)
+#   MEMORY_MIN_CONFIDENCE   -> classifier confidence needed before a long-term memory is even offered (0.80)
+try:
+    SHORT_TERM_MEMORY_LIMIT = max(2, min(40, int(os.environ.get("SHORT_TERM_MEMORY_LIMIT", "10"))))
+except ValueError:
+    SHORT_TERM_MEMORY_LIMIT = 10
+
+MEMORY_STORE = None
+MEMORY_ERROR = ""
+try:
+    MEMORY_STORE = MemoryStore()          # creates the tables if they do not exist
+    print(f"Memory database ready ({MEMORY_STORE.backend}).")
+except Exception as _mem_error:           # the chatbot must still start without the database
+    MEMORY_ERROR = f"{type(_mem_error).__name__}: {_mem_error}"
+    for _secret in (os.environ.get("DATABASE_URL", ""), os.environ.get("GROQ_API_KEY", "")):
+        if _secret:
+            MEMORY_ERROR = MEMORY_ERROR.replace(_secret, "***")
+    MEMORY_ERROR = MEMORY_ERROR[:300]
+    print("Memory database NOT available:", MEMORY_ERROR)
 
 
 # ==========================================
@@ -715,7 +745,7 @@ PRIVACY:
 - Do not reveal private or confidential information.
 """
 
-MAX_HISTORY_MESSAGES = 10  # context filtering: keep only the latest turns
+MAX_HISTORY_MESSAGES = SHORT_TERM_MEMORY_LIMIT  # SHORT-TERM MEMORY: keep only the latest turns (configurable)
 
 
 def make_profile(name, level, interests, goal):
@@ -769,9 +799,13 @@ def assemble_prompt(message, history, profile=None, use_profile=True,
                     technique="Zero-shot", output_format="Normal text",
                     use_grounding=True, extra_instructions="", custom_format="",
                     rag_index=None, use_rag=True, language="English", max_words=0,
-                    manual_instructions=""):
+                    manual_instructions="", memory_text="", memory_items=None,
+                    history_limit=None):
     """Assemble the full prompt.
+    memory_text  = long-term memory block built by memory_manager (empty if not used)
+    history_limit = how many latest chat messages to send (short-term memory)
     Returns (messages, official_data, error_text, trace)."""
+    history_limit = int(history_limit or MAX_HISTORY_MESSAGES)
     system_parts = [ROLES.get(role, ROLES["Default NeuroBot"]), BASE_RULES]
 
     extra = (extra_instructions or "").strip()
@@ -800,6 +834,10 @@ def assemble_prompt(message, history, profile=None, use_profile=True,
         profile_text = profile_to_text(profile)
         if profile_text:
             system_parts.append(profile_text)
+
+    # LONG-TERM MEMORY: saved facts about this student (only the logged-in student's own rows)
+    if memory_text:
+        system_parts.append(memory_text)
 
     messages = [{"role": "system", "content": "\n".join(system_parts)}]
     official_data = None
@@ -885,7 +923,7 @@ def assemble_prompt(message, history, profile=None, use_profile=True,
     used_history = []
     total_history = len(history_to_messages(history, limit=None))
     if use_history:
-        used_history = history_to_messages(history)
+        used_history = history_to_messages(history, limit=history_limit)
         messages.extend(used_history)
 
     messages.append({"role": "user", "content": message})
@@ -916,6 +954,9 @@ def assemble_prompt(message, history, profile=None, use_profile=True,
         "constraint_text": constraint_text,
         "trusted": trusted,
         "trusted_loaded": bool(tindex),
+        "history_limit": history_limit,
+        "memory_text": memory_text,
+        "memory_items": list(memory_items or []),
     }
     return messages, official_data, None, trace
 
@@ -975,6 +1016,11 @@ def llm_call(messages, temperature=0.7, max_tokens=1024, top_p=1.0,
         "total_tokens": usage.total_tokens if usage else 0,
         "penalty_ignored": penalty_ignored,
     }
+
+
+def _memory_llm(messages):
+    """Small helper for the memory classifier: returns only the model text."""
+    return llm_call(messages, temperature=0, max_tokens=800, top_p=1)["answer"]
 
 
 # ==========================================
@@ -1344,8 +1390,15 @@ def render_ctx_filter(trace):
         rows.append("| Conversation history | ❌ No | Switched off |")
     else:
         used, total = len(trace["history_used"]), trace["history_total"]
-        extra = f" ({total - used} older message(s) dropped by the {MAX_HISTORY_MESSAGES}-message limit)" if total > used else ""
+        extra = f" ({total - used} older message(s) dropped by the {trace.get('history_limit', MAX_HISTORY_MESSAGES)}-message limit)" if total > used else ""
         rows.append(f"| Conversation history | ✅ {used} of {total} messages | Latest messages only{extra} |")
+    mem_items = trace.get("memory_items") or []
+    if mem_items:
+        rows.append(f"| Long-term memory | ✅ {len(mem_items)} item(s): "
+                    f"{', '.join(CATEGORY_LABELS.get(m['category'], m['category']) for m in mem_items)} "
+                    "| Saved earlier with your consent |")
+    else:
+        rows.append("| Long-term memory | ❌ No | Not logged in, switched off, or nothing relevant saved |")
     if g is None:
         rows.append("| Course data | ❌ No | Question is not course-related |")
     else:
@@ -1569,7 +1622,8 @@ def keep(n):
 
 # Output order of send_message (must match SEND_OUTPUTS in the layout):
 # chatbot, msg, prompt_hist, ph_dropdown, status, [11 panels], so, cls, eval, verify
-N_SEND_OUTPUTS = 5 + len(PANEL_KEYS) + 4
+# NEW: + pending_state, consent_box, consent_md, mem_trace_md, mem_list_md, mem_dd (memory outputs, at the end)
+N_SEND_OUTPUTS = 5 + len(PANEL_KEYS) + 4 + 6
 
 
 def apply_word_limit(raw_answer, messages, max_words, output_format, temperature, max_tokens, top_p):
@@ -1610,7 +1664,8 @@ def send_message(message, chat, prompt_hist, name, level, interests, goal,
                  use_profile, use_history, role, technique, output_format,
                  custom_format, temperature, max_tokens, top_p,
                  run_class, run_eval, extra_instr, use_rag, rag_state,
-                 run_verify, language, max_words, manual_instr):
+                 run_verify, language, max_words, manual_instr,
+                 mem_user, use_memory, auto_save, hist_limit, pending_mem):
     message = (message or "").strip()
     chat = list(chat or [])
     prompt_hist = list(prompt_hist or [])
@@ -1621,11 +1676,25 @@ def send_message(message, chat, prompt_hist, name, level, interests, goal,
         yield tuple(out)
         return
 
+    # ---- NEW: MEMORY STEPS 1-3 (identify user, classify + decide, retrieve long-term memory) ----
+    user_id = mem_user["id"] if (mem_user and MEMORY_STORE) else None
+    mem_info = None
+    if use_memory:
+        try:
+            mem_info = process_message_memory(
+                MEMORY_STORE if user_id else None, user_id, message,
+                llm_fn=_memory_llm, auto_save=bool(auto_save), pending=pending_mem)
+        except Exception as error:      # memory problems must never stop the chat
+            print("Memory error:", str(error)[:300])
+            mem_info = None
+    memory_text = mem_info["memory_text"] if mem_info else ""
+    memory_items = mem_info["relevant"] if mem_info else []
+
     profile = make_profile(name, level, interests, goal)
     messages, official_data, error, trace = assemble_prompt(
         message, chat, profile, use_profile, use_history, role, technique,
         output_format, True, extra_instr, custom_format, rag_state, use_rag,
-        language, max_words, manual_instr,
+        language, max_words, manual_instr, memory_text, memory_items, hist_limit,
     )
     if error:
         out = keep(N_SEND_OUTPUTS)
@@ -1729,24 +1798,44 @@ def send_message(message, chat, prompt_hist, name, level, interests, goal,
     ]
     final += [panels[k] for k in PANEL_KEYS]
     final += [so_md, cls_md, eval_md, ver_md]
+
+    # ---- NEW: memory outputs (consent box, decision trace, saved list) ----
+    new_pending = mem_info["pending"] if mem_info else (pending_mem or [])
+    mem_list_md, mem_dd_update = render_memory_list(mem_user)
+    final += [
+        new_pending,
+        gr.update(visible=bool(new_pending)),
+        render_consent_text(new_pending),
+        render_memory_trace(mem_info, use_memory, bool(user_id)),
+        mem_list_md,
+        mem_dd_update,
+    ]
     yield tuple(final)
 
 
 def preview_prompt(message, chat, name, level, interests, goal,
                    use_profile, use_history, role, technique, output_format,
                    custom_format, temperature, max_tokens, top_p, extra_instr,
-                   use_rag, rag_state, language, max_words, manual_instr):
-    """Show the final prompt WITHOUT calling the model (no API cost)."""
+                   use_rag, rag_state, language, max_words, manual_instr,
+                   mem_user, use_memory, hist_limit):
+    """Show the final prompt WITHOUT calling the model (no API cost).
+    Memory: preview only READS saved memories. It never classifies or saves anything."""
     message = (message or "").strip()
     if not message:
         out = keep(len(PANEL_KEYS) + 1)
         out[0] = "⚠️ Type a prompt first, then preview it."
         return tuple(out)
+    memory_text, memory_items = "", []
+    if use_memory and mem_user and MEMORY_STORE:
+        try:
+            memory_items, memory_text = get_memory_context(MEMORY_STORE, mem_user["id"], message)
+        except Exception as error:
+            print("Memory preview error:", str(error)[:300])
     profile = make_profile(name, level, interests, goal)
     messages, official, error, trace = assemble_prompt(
         message, list(chat or []), profile, use_profile, use_history, role,
         technique, output_format, True, extra_instr, custom_format, rag_state, use_rag,
-        language, max_words, manual_instr,
+        language, max_words, manual_instr, memory_text, memory_items, hist_limit,
     )
     if error:
         out = keep(len(PANEL_KEYS) + 1)
@@ -1783,6 +1872,196 @@ def reset_admin_instructions():
 def toggle_panel(visible):
     new_state = not visible
     return gr.update(visible=new_state), new_state
+
+
+# ==========================================
+# 10B. MEMORY MANAGEMENT (login, consent, view, delete)
+# ==========================================
+# SHORT-TERM memory = the chat messages (Gradio keeps them; we send the latest N to the model).
+# LONG-TERM memory  = facts saved in PostgreSQL for the logged-in student, only after consent.
+
+ACTION_TEXT = {
+    "WAITING_FOR_CONSENT": "🟡 Waiting for your permission",
+    "SAVED": "✅ Saved (auto-save is on)",
+    "ALREADY_SAVED": "✔️ Already saved",
+    "SKIP_UNCERTAIN": "⚪ Not saved (not sure enough)",
+    "KEEP_SHORT_TERM": "💬 Kept in this chat only",
+    "DO_NOT_SAVE": "⛔ Not saved",
+    "LOGIN_REQUIRED": "🔑 Log in to save this",
+}
+
+
+def _md_cell(text):
+    return str(text or "").replace("|", "/").replace("\n", " ")
+
+
+def render_memory_status(user):
+    if MEMORY_STORE is None:
+        return ("❌ **Memory database is not available.** Chat works normally, but memory is off.\n\n"
+                f"**Reason:** {MEMORY_ERROR or 'unknown'}\n\n"
+                "Set `DATABASE_URL` in Render > Environment and redeploy.")
+    where = "PostgreSQL" if MEMORY_STORE.backend == "postgres" else "local SQLite file"
+    warn = ""
+    if MEMORY_STORE.backend == "sqlite":
+        warn = ("\n\n⚠️ **No `DATABASE_URL` found.** Memories are stored in a temporary file that Render "
+                "deletes when the app redeploys. Use PostgreSQL for real persistence.")
+    if user:
+        return f"🟢 **Logged in as `{user['username']}`.** Storage: {where}.{warn}"
+    return f"⚪ **Not logged in.** Storage: {where}. Log in or create an account to use long-term memory.{warn}"
+
+
+def render_memory_list(user):
+    """Returns (markdown_table, dropdown_update)."""
+    if MEMORY_STORE is None or not user:
+        return ("Log in to see your saved memories.",
+                gr.update(choices=[], value=None))
+    try:
+        memories = MEMORY_STORE.get_memories(user["id"])
+    except Exception as error:
+        print("Memory list error:", str(error)[:300])
+        return ("❌ Could not read your memories right now.", gr.update(choices=[], value=None))
+    if not memories:
+        return ("No long-term memories saved yet. Tell NeuroBot something like "
+                "*\"My name is Karthika\"* and approve the save request.",
+                gr.update(choices=[], value=None))
+    rows = ["| # | Category | Saved value | Last updated |", "|---|---|---|---|"]
+    choices = []
+    for m in memories:
+        label = CATEGORY_LABELS.get(m["category"], m["category"])
+        rows.append(f"| {m['id']} | {label} | {_md_cell(m['value'])} | {_md_cell(m['updated_at'])[:19]} |")
+        choices.append((f"{label}: {m['value'][:40]}", m["id"]))
+    return "\n".join(rows), gr.update(choices=choices, value=None)
+
+
+def render_consent_text(pending):
+    if not pending:
+        return ""
+    lines = "\n".join(
+        f"- **{CATEGORY_LABELS.get(p['category'], p['category'])}:** {_md_cell(p['value'])}" for p in pending)
+    return ("### 🧠 Save to long-term memory?\n"
+            "NeuroBot noticed these details in your message:\n\n" + lines +
+            "\n\nIf you press **Save**, they are stored in the database and used in future chats. "
+            "You can view or delete them any time in the **Memory** tab.")
+
+
+def render_memory_trace(info, use_memory, logged_in):
+    if not use_memory:
+        return "Long-term memory is **switched off**. Nothing was classified, saved or retrieved."
+    if info is None:
+        return "Memory processing did not run for this message (an error was logged on the server)."
+    out = [f"**Logged in:** {'yes' if logged_in else 'no'}"]
+    rows = ["| Type | What was found | Confidence | Source | Decision |", "|---|---|---|---|---|"]
+    for cand, dec in zip(info["candidates"], info["decisions"]):
+        found = cand.get("information") or cand.get("reason") or ""
+        rows.append(f"| {cand['memory_type']} | {_md_cell(found)} | {cand['confidence']} | "
+                    f"{cand.get('source', 'rules')} | {ACTION_TEXT.get(dec['action'], dec['action'])}: "
+                    f"{_md_cell(dec['reason'])} |")
+    out.append("**Classification of your last message**\n\n" + "\n".join(rows))
+    if info["relevant"]:
+        used = "\n".join(
+            f"- {CATEGORY_LABELS.get(m['category'], m['category'])}: {_md_cell(m['value'])}" for m in info["relevant"])
+        out.append("**Long-term memories sent to the model for this answer:**\n\n" + used)
+    else:
+        out.append("**Long-term memories sent to the model:** none")
+    return "\n\n".join(out)
+
+
+def _login_outputs(user, message):
+    """Common return value for login / register / logout (matches MEMORY_AUTH_OUTPUTS)."""
+    list_md, dd = render_memory_list(user)
+    status = render_memory_status(user)
+    if message:
+        status += "\n\n" + message
+    # clear: password box, pending consent, consent box, chat window
+    return user, status, list_md, dd, "", [], gr.update(visible=False), []
+
+
+def mem_login(username, password):
+    if MEMORY_STORE is None:
+        return _login_outputs(None, "")
+    try:
+        user, msg = MEMORY_STORE.login_user(username, password)
+    except Exception as error:
+        print("Login error:", str(error)[:300])
+        return _login_outputs(None, "❌ Login failed because of a server error.")
+    if not user:
+        return _login_outputs(None, "❌ " + msg)
+    return _login_outputs(user, "✅ Logged in. The chat window was cleared so conversations are not mixed.")
+
+
+def mem_register(username, password):
+    if MEMORY_STORE is None:
+        return _login_outputs(None, "")
+    try:
+        user, msg = MEMORY_STORE.register_user(username, password)
+    except Exception as error:
+        print("Register error:", str(error)[:300])
+        return _login_outputs(None, "❌ Could not create the account because of a server error.")
+    if not user:
+        return _login_outputs(None, "❌ " + msg)
+    return _login_outputs(user, "✅ Account created and logged in.")
+
+
+def mem_logout():
+    return _login_outputs(None, "👋 Logged out. The chat window was cleared.")
+
+
+def mem_approve(user, pending):
+    """Student pressed SAVE in the consent box."""
+    if not user or MEMORY_STORE is None:
+        msg = "⚠️ Log in first."
+    else:
+        try:
+            saved, errors = approve_pending(MEMORY_STORE, user["id"], pending)
+            msg = "✅ Saved to long-term memory: " + ", ".join(
+                f"{CATEGORY_LABELS.get(s['category'], s['category'])} = {s['value']}" for s in saved) if saved else "ℹ️ Nothing was saved."
+            if errors:
+                msg += " | Skipped: " + "; ".join(errors)
+        except Exception as error:
+            print("Save memory error:", str(error)[:300])
+            msg = "❌ Could not save because of a server error."
+    list_md, dd = render_memory_list(user)
+    return [], gr.update(visible=False), msg, list_md, dd
+
+
+def mem_reject(pending):
+    """Student pressed DON'T SAVE."""
+    return [], gr.update(visible=False), "🚫 Not saved. Nothing was written to the database."
+
+
+def mem_delete_selected(user, memory_id):
+    if not user or MEMORY_STORE is None:
+        msg = "⚠️ Log in first."
+    elif memory_id in (None, ""):
+        msg = "⚠️ Choose a memory in the dropdown first."
+    else:
+        try:
+            ok = MEMORY_STORE.delete_memory(user["id"], int(memory_id))
+            msg = "🗑 Memory deleted." if ok else "ℹ️ That memory was not found."
+        except Exception as error:
+            print("Delete memory error:", str(error)[:300])
+            msg = "❌ Could not delete because of a server error."
+    list_md, dd = render_memory_list(user)
+    return msg, list_md, dd
+
+
+def mem_delete_all(user):
+    if not user or MEMORY_STORE is None:
+        msg = "⚠️ Log in first."
+    else:
+        try:
+            count = MEMORY_STORE.delete_all_memories(user["id"])
+            msg = f"🗑 Deleted {count} memory item(s)."
+        except Exception as error:
+            print("Delete all error:", str(error)[:300])
+            msg = "❌ Could not delete because of a server error."
+    list_md, dd = render_memory_list(user)
+    return msg, list_md, dd
+
+
+def mem_refresh(user):
+    list_md, dd = render_memory_list(user)
+    return render_memory_status(user), list_md, dd
 
 
 # ==========================================
@@ -1993,6 +2272,12 @@ CONCEPTS_MD = """
 - **Grounding:** course answers must come from `course_info.json`; document answers must come from the retrieved chunks. After the answer, a **verification** step checks it against that source and reports Verified, Partially verified or Not verified (*Evaluate* tab). Approved reference material in `trusted_sources.json` is searched too, so answers can be checked against trusted sources.
 - **RAG:** upload a file (TXT, MD, CSV, JSON, PDF, DOCX). It is split into chunks, indexed with BM25 keyword scoring, and the best chunks are added to the prompt. This is keyword retrieval, not embedding or vector search.
 
+## Memory Management (Memory tab)
+- **Short-term memory:** the latest chat messages (default 10, adjustable in the *Memory* tab) are sent with every question, so "Give me an example" is understood as a follow-up. It lasts only for the current session.
+- **Long-term memory:** name, learning level, preferred language, interests and goals are saved in PostgreSQL for your account, **only after you press Save**. Saved memories are added to the prompt in later chats (for example, Tanglish explanations for a beginner named Karthika).
+- **Classification:** every message is classified as `LONG_TERM_MEMORY`, `SHORT_TERM_MEMORY` or `NO_PERMANENT_MEMORY` (rules first, the LLM only for unclear personal messages). Low-confidence or sensitive content (passwords, API keys, card numbers, e-mail, ID numbers) is never saved.
+- **Privacy:** every query is filtered by your user ID, you can view and delete memories at any time, and memory text is treated as data, never as instructions.
+
 ## LLM Parameters
 | Parameter | Meaning | Low | High |
 |---|---|---|---|
@@ -2066,6 +2351,8 @@ with gr.Blocks(title="NeuroBot | NeuroGen AI Academy", theme=gr.themes.Soft(), c
             panel_open = gr.State(True)
             extra_instr = gr.State("")
             rag_state = gr.State(None)   # per-session document index
+            mem_user = gr.State(None)    # NEW: logged-in student {"id":..., "username":...} (server-side, per session)
+            pending_mem = gr.State([])   # NEW: long-term memories waiting for the student's consent
 
             with gr.Row(elem_classes="nb-main"):
 
@@ -2078,6 +2365,13 @@ with gr.Blocks(title="NeuroBot | NeuroGen AI Academy", theme=gr.themes.Soft(), c
                         label="NeuroBot",
                     )
                     status_md = gr.Markdown("Ready. Ask a question or click a quick prompt.")
+
+                    # NEW: consent box (appears only when NeuroBot finds something worth remembering)
+                    with gr.Column(visible=False) as consent_box:
+                        consent_md = gr.Markdown("")
+                        with gr.Row():
+                            consent_yes = gr.Button("✅ Save to memory", variant="primary", size="sm")
+                            consent_no = gr.Button("❌ Don't save", size="sm")
 
                     with gr.Row():
                         quick_buttons = [gr.Button(q[0], size="sm") for q in QUICK_PROMPTS]
@@ -2160,6 +2454,37 @@ with gr.Blocks(title="NeuroBot | NeuroGen AI Academy", theme=gr.themes.Soft(), c
                                 rag_clear_btn = gr.Button("🗑 Remove document", size="sm")
                                 ctx_rag_md = gr.Markdown(render_ctx_rag(None))
 
+                        # --- NEW: Memory management (short-term + long-term) ---
+                        with gr.Tab("🧬 Memory"):
+                            gr.Markdown(
+                                "**Short-term memory** = the latest chat messages (this session).\n\n"
+                                "**Long-term memory** = facts you approve (name, level, language, interests, goal), "
+                                "saved in the database for your account. Passwords, API keys, payment details and "
+                                "other sensitive data are never saved."
+                            )
+                            use_memory = gr.Checkbox(value=True, label="Use long-term memory (classify messages and add saved memories to the prompt)")
+                            auto_save = gr.Checkbox(value=False, label="Save automatically without asking (not recommended; consent box is skipped)")
+                            hist_limit = gr.Slider(2, 40, value=SHORT_TERM_MEMORY_LIMIT, step=2,
+                                                   label="Short-term memory: latest chat messages sent to the model")
+                            mem_status_md = gr.Markdown(render_memory_status(None))
+                            with gr.Accordion("Login / create account", open=True):
+                                mem_username = gr.Textbox(label="Username", placeholder="3-30 letters, numbers, . - _")
+                                mem_password = gr.Textbox(label="Password", type="password", placeholder="at least 6 characters")
+                                with gr.Row():
+                                    mem_login_btn = gr.Button("Log in", variant="primary", size="sm")
+                                    mem_register_btn = gr.Button("Create account", size="sm")
+                                    mem_logout_btn = gr.Button("Log out", size="sm")
+                            with gr.Accordion("My saved memories", open=True):
+                                mem_list_md = gr.Markdown("Log in to see your saved memories.")
+                                mem_dd = gr.Dropdown([], value=None, label="Choose a memory to delete")
+                                with gr.Row():
+                                    mem_del_btn = gr.Button("🗑 Delete selected", size="sm")
+                                    mem_del_all_btn = gr.Button("🗑 Delete all my memories", size="sm")
+                                    mem_refresh_btn = gr.Button("🔄 Refresh", size="sm")
+                                mem_action_md = gr.Markdown("")
+                            with gr.Accordion("What happened to my last message?", open=False):
+                                mem_trace_md = gr.Markdown("Shown after Send.")
+
                         # --- Conversation history ---
                         with gr.Tab("🕘 History"):
                             hist_md = gr.Markdown("No conversation yet.")
@@ -2221,6 +2546,7 @@ with gr.Blocks(title="NeuroBot | NeuroGen AI Academy", theme=gr.themes.Soft(), c
                 use_profile, use_history, role, technique, out_format, custom_fmt,
                 temperature, max_tokens, top_p, run_class, run_eval, extra_instr,
                 use_rag, rag_state, run_verify, language, max_words, custom_instr,
+                mem_user, use_memory, auto_save, hist_limit, pending_mem,
             ]
             PANEL_COMPONENTS = [
                 cur_prompt_md, final_prompt_md, params_md, ctx_user_md, ctx_conv_md,
@@ -2230,12 +2556,14 @@ with gr.Blocks(title="NeuroBot | NeuroGen AI Academy", theme=gr.themes.Soft(), c
                 [chatbot, msg, prompt_hist, history_dd, status_md]
                 + PANEL_COMPONENTS
                 + [so_md, cls_md, eval_md, ver_md]
+                + [pending_mem, consent_box, consent_md, mem_trace_md, mem_list_md, mem_dd]
             )
             PREVIEW_INPUTS = [
                 msg, chatbot, p_name, p_level, p_interests, p_goal,
                 use_profile, use_history, role, technique, out_format, custom_fmt,
                 temperature, max_tokens, top_p, extra_instr, use_rag, rag_state,
                 language, max_words, custom_instr,
+                mem_user, use_memory, hist_limit,
             ]
             PREVIEW_OUTPUTS = [status_md] + PANEL_COMPONENTS
 
@@ -2247,6 +2575,19 @@ with gr.Blocks(title="NeuroBot | NeuroGen AI Academy", theme=gr.themes.Soft(), c
             clear_hist_btn.click(clear_chat, None, [chatbot, hist_md, ctx_conv_md, status_md])
 
             panel_btn.click(toggle_panel, panel_open, [side_panel, panel_open])
+
+            # NEW: memory login / consent / view / delete
+            MEMORY_AUTH_OUTPUTS = [mem_user, mem_status_md, mem_list_md, mem_dd, mem_password,
+                                   pending_mem, consent_box, chatbot]
+            mem_login_btn.click(mem_login, [mem_username, mem_password], MEMORY_AUTH_OUTPUTS)
+            mem_register_btn.click(mem_register, [mem_username, mem_password], MEMORY_AUTH_OUTPUTS)
+            mem_logout_btn.click(mem_logout, None, MEMORY_AUTH_OUTPUTS)
+            consent_yes.click(mem_approve, [mem_user, pending_mem],
+                              [pending_mem, consent_box, status_md, mem_list_md, mem_dd])
+            consent_no.click(mem_reject, pending_mem, [pending_mem, consent_box, status_md])
+            mem_del_btn.click(mem_delete_selected, [mem_user, mem_dd], [mem_action_md, mem_list_md, mem_dd])
+            mem_del_all_btn.click(mem_delete_all, mem_user, [mem_action_md, mem_list_md, mem_dd])
+            mem_refresh_btn.click(mem_refresh, mem_user, [mem_status_md, mem_list_md, mem_dd])
 
             # RAG upload / remove
             rag_file.change(handle_upload, rag_file, [rag_state, rag_status_md])
