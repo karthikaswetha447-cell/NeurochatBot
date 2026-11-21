@@ -11,7 +11,8 @@ from datetime import date
 import gradio as gr
 from groq import Groq
 
-import memory_manager as mm   # short-term / long-term memory logic (see memory_manager.py)
+import memory_manager as mm   # short-term / long-term memory logic
+import multimodal_engine as multi  # image, audio, video helpers
 
 
 # ==========================================
@@ -2093,9 +2094,9 @@ CSS = """
 # 12B. MEMORY: SHORT-TERM + LONG-TERM (handlers)
 # ==========================================
 # Short-term memory = the latest chat messages sent with every question (history_to_messages).
-# Long-term memory  = facts saved in PostgreSQL for a LOGGED-IN user (memory_manager.py).
+# Long-term memory  = facts saved in SQLite for a LOGGED-IN user (memory_manager.py).
 
-MEMORY_STORE = mm.create_store_from_env()      # PostgresStore, or None when DATABASE_URL is not set
+MEMORY_STORE = mm.create_store_from_env()      # SQLite store (persistent disk path on Render)
 LOGIN_LIMITER = mm.LoginLimiter(max_failures=5, window=300, lockout=300)
 MEMORY_LEVELS = ("Beginner", "Intermediate", "Advanced")
 
@@ -2115,7 +2116,7 @@ They are saved in the database for **your account** and used in future chats.
 def memory_available():
     """(True, None) when the database can be used, otherwise (False, reason)."""
     if MEMORY_STORE is None:
-        return False, "DATABASE_URL is not set"
+        return False, "SQLite database could not be initialized"
     return MEMORY_STORE.ensure_ready()
 
 
@@ -2124,7 +2125,7 @@ def memory_status_text():
     if ok:
         return "✅ Memory database connected."
     if MEMORY_STORE is None:
-        return ("⚠️ Long-term memory is **switched off** because the `DATABASE_URL` environment variable is not set. "
+        return ("⚠️ Long-term memory is **switched off** because the SQLite database could not be initialized. "
                 "Short-term memory (conversation history) still works.")
     return f"❌ The memory database is not reachable. Short-term memory still works.\n\n**Reason:** {err}"
 
@@ -2388,6 +2389,42 @@ def memory_delete_all(user):
 
 
 # ==========================================
+# ==========================================
+# 12C. MULTIMODAL CALLBACKS
+# ==========================================
+
+def run_multimodal(image_path, audio_path, video_path, question):
+    try:
+        answer, transcript = multi.analyze_multimodal(
+            image_path=image_path, audio_path=audio_path,
+            video_path=video_path, question=question
+        )
+        note = "Analysis complete. Use **Send analysis to chat** to continue with your existing memory, RAG and context pipeline."
+        if video_path:
+            note += "\n\nVideo limitation: this version analyzes sampled frames plus extracted audio when available; it is not continuous full-motion understanding."
+        return answer, transcript, note
+    except Exception as error:
+        return "", "", "❌ " + safe_error(error)
+
+
+def multimodal_to_chat(answer, question):
+    answer = (answer or "").strip()
+    question = (question or "").strip()
+    if not answer:
+        return gr.update()
+    return ("Please use this uploaded-media analysis as context for my question.\n\n"
+            + (f"My question: {question}\n\n" if question else "")
+            + "Media analysis:\n" + answer)
+
+
+def make_voice_response(text):
+    try:
+        path = multi.generate_speech(text)
+        return path, "Voice response generated. English voice is supported by the configured Groq TTS model."
+    except Exception as error:
+        return None, "❌ " + safe_error(error)
+
+
 # 13. GRADIO INTERFACE
 # ==========================================
 
@@ -2679,7 +2716,45 @@ with gr.Blocks(title="NeuroBot | NeuroGen AI Academy", theme=gr.themes.Soft(), c
             admin_reset.click(reset_admin_instructions, None, [extra_instr, admin_status, admin_pw])
 
         # ---------------------------------------------------------
-        # TAB 2: EXPERIMENTS
+        # ---------------------------------------------------------
+        # TAB 2: MULTIMODAL (additive; existing dashboard remains intact)
+        # ---------------------------------------------------------
+        with gr.Tab("🖼️ Multimodal"):
+            gr.Markdown(
+                "### Talk to NeuroBot using images, audio and video\n"
+                "Your media is processed for this request. It is not automatically saved as long-term memory. "
+                "Send the analysis into the normal chat to apply your existing memory, RAG and context settings."
+            )
+            mm_question = gr.Textbox(
+                label="What would you like NeuroBot to understand?",
+                placeholder="Explain this diagram / transcribe this recording / summarize this video",
+                lines=2
+            )
+            with gr.Row():
+                with gr.Column():
+                    mm_image = gr.Image(type="filepath", label="Image (JPG, PNG, WEBP)", height=220)
+                    mm_audio = gr.Audio(type="filepath", label="Audio upload or microphone", sources=["upload", "microphone"])
+                    mm_video = gr.Video(label="Video upload", height=220)
+            mm_run = gr.Button("Analyze media", variant="primary")
+            mm_status = gr.Markdown("Upload one or more media files and click Analyze.")
+            mm_transcript = gr.Textbox(label="Audio transcription", lines=4, interactive=False)
+            mm_answer = gr.Textbox(label="NeuroBot media analysis", lines=12, interactive=False)
+            with gr.Row():
+                mm_send_chat = gr.Button("Send analysis to Chat Dashboard", variant="primary")
+                mm_voice_btn = gr.Button("Generate spoken response")
+            mm_voice = gr.Audio(label="Generated voice response", type="filepath")
+            mm_voice_status = gr.Markdown("")
+            mm_run.click(
+                run_multimodal,
+                [mm_image, mm_audio, mm_video, mm_question],
+                [mm_answer, mm_transcript, mm_status]
+            )
+            mm_send_chat.click(multimodal_to_chat, [mm_answer, mm_question], msg)
+            mm_voice_btn.click(make_voice_response, mm_answer, [mm_voice, mm_voice_status])
+
+        # ---------------------------------------------------------
+        # TAB 3: EXPERIMENTS
+        # ---------------------------------------------------------
         # ---------------------------------------------------------
         with gr.Tab("🧪 Experiments"):
             gr.Markdown("Experiments use the profile, role and parameter values from the Chat Dashboard panel. Each run makes several API calls.")
