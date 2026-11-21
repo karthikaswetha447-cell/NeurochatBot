@@ -9,8 +9,8 @@ LONG-TERM MEMORY   = useful facts about the student (name, level, language, inte
                      saved in a database AFTER the student gives consent.
 
 Database:
-  * Render / production : PostgreSQL  (set the DATABASE_URL environment variable)
-  * Local testing       : SQLite file (automatic fallback when DATABASE_URL is empty)
+  * All environments    : SQLite file (set MEMORY_SQLITE_PATH to choose its location)
+  * Render / production : mount a persistent disk and store the SQLite file on that disk
 
 Main functions (used by app.py):
   classify_memory / classify_memory_all   -> what kind of memory is this message?
@@ -487,29 +487,19 @@ def decide_memory_action(classification, existing_value=None, min_confidence=Non
             "value": val}
 
 
-# ==========================================
-# 7. DATABASE (PostgreSQL on Render, SQLite for local tests)
-# ==========================================
 
-_PG_SCHEMA = [
-    """CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        username TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        salt TEXT NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )""",
-    """CREATE TABLE IF NOT EXISTS user_memory (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        memory_category TEXT NOT NULL,
-        memory_value TEXT NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE (user_id, memory_category)
-    )""",
-    "CREATE INDEX IF NOT EXISTS idx_user_memory_user ON user_memory (user_id)",
-]
+USERNAME_RE = re.compile(r"[A-Za-z0-9_.\-]{3,30}")
+
+
+def hash_password(password, salt_hex=None):
+    salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", (password or "").encode("utf-8"), salt, PBKDF2_ROUNDS)
+    return salt.hex(), digest.hex()
+
+
+# ==========================================
+# 7. SQLITE DATABASE (SQLite only)
+# ==========================================
 
 _SQLITE_SCHEMA = [
     """CREATE TABLE IF NOT EXISTS users (
@@ -528,60 +518,40 @@ _SQLITE_SCHEMA = [
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
         UNIQUE (user_id, memory_category)
     )""",
-    "CREATE INDEX IF NOT EXISTS idx_user_memory_user ON user_memory (user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_user_memory_user ON user_memory(user_id)",
 ]
-
-USERNAME_RE = re.compile(r"[A-Za-z0-9_.\-]{3,30}")
-
-
-def hash_password(password, salt_hex=None):
-    salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ROUNDS)
-    return salt.hex(), digest.hex()
 
 
 class MemoryStore:
-    """All database work lives here. Every SQL statement is parameterised (no string formatting
-    of user data), and every query that touches memories filters by user_id."""
-
+    """SQLite-only store. Every query is parameterised and user-scoped."""
     def __init__(self, database_url=None, sqlite_path=None):
-        if database_url is None:
-            database_url = os.environ.get("DATABASE_URL", "").strip()
-        self.database_url = database_url
-        self.sqlite_path = sqlite_path or os.environ.get("MEMORY_SQLITE_PATH", "neurobot_memory.db")
-        self.backend = "postgres" if self.database_url else "sqlite"
-        self._lock = threading.Lock()
-        if self.backend == "postgres":
-            try:
-                import psycopg2  # noqa: F401
-            except ImportError:
-                raise RuntimeError("PostgreSQL needs the 'psycopg2-binary' package (add it to requirements.txt).")
+        self.sqlite_path = sqlite_path or os.environ.get(
+            "MEMORY_SQLITE_PATH",
+            "/var/data/neurobot_memory.db" if os.path.isdir("/var/data") else "neurobot_memory.db"
+        )
+        os.makedirs(os.path.dirname(os.path.abspath(self.sqlite_path)), exist_ok=True)
+        self._lock = threading.RLock()
         self.init_db()
 
-    # ---------- low level ----------
+    @property
+    def backend(self):
+        return "sqlite"
+
     def _connect(self):
-        if self.backend == "postgres":
-            import psycopg2
-            return psycopg2.connect(self.database_url, connect_timeout=10)
-        conn = sqlite3.connect(self.sqlite_path, timeout=10)
-        conn.execute("PRAGMA foreign_keys = ON")
+        conn = sqlite3.connect(self.sqlite_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _execute(self, sql, params=(), fetch=None):
-        """Run ONE statement. Returns (rows, rowcount, lastrowid)."""
-        if self.backend == "postgres":
-            sql = sql.replace("?", "%s")
         with self._lock:
             conn = self._connect()
             try:
-                cur = conn.cursor()
-                cur.execute(sql, params)
-                rows = None
-                if fetch == "one":
-                    rows = cur.fetchone()
-                elif fetch == "all":
-                    rows = cur.fetchall()
-                result = (rows, cur.rowcount, getattr(cur, "lastrowid", None))
+                cur = conn.execute(sql, params)
+                rows = cur.fetchone() if fetch == "one" else cur.fetchall() if fetch == "all" else None
+                result = (rows, cur.rowcount, cur.lastrowid)
                 conn.commit()
                 return result
             except Exception:
@@ -591,108 +561,193 @@ class MemoryStore:
                 conn.close()
 
     def init_db(self):
-        """Create the tables if they do not exist yet (safe to run on every start)."""
-        for statement in (_PG_SCHEMA if self.backend == "postgres" else _SQLITE_SCHEMA):
+        for statement in _SQLITE_SCHEMA:
             self._execute(statement)
 
-    # ---------- users ----------
+    def ensure_ready(self):
+        try:
+            self._execute("SELECT 1", fetch="one")
+            return True, None
+        except Exception as exc:
+            return False, str(exc)[:250]
+
     def register_user(self, username, password):
-        """Returns (user_dict_or_None, message)."""
         username = (username or "").strip().lower()
-        password = password or ""
         if not USERNAME_RE.fullmatch(username):
             return None, "Username must be 3-30 characters: letters, numbers, dot, dash or underscore."
-        if not 6 <= len(password) <= 128:
-            return None, "Password must be 6 to 128 characters."
-        rows, _, _ = self._execute("SELECT id FROM users WHERE username = ?", (username,), fetch="one")
-        if rows:
-            return None, "That username is already taken."
+        if not 8 <= len(password or "") <= 128:
+            return None, "Password must be 8 to 128 characters."
         salt, digest = hash_password(password)
         try:
-            if self.backend == "postgres":
-                rows, _, _ = self._execute(
-                    "INSERT INTO users (username, password_hash, salt, created_at) VALUES (?, ?, ?, ?) RETURNING id",
-                    (username, digest, salt, _now_iso()), fetch="one")
-                uid = rows[0]
-            else:
-                _, _, uid = self._execute(
-                    "INSERT INTO users (username, password_hash, salt, created_at) VALUES (?, ?, ?, ?)",
-                    (username, digest, salt, _now_iso()))
-        except Exception as error:
-            print("Register error:", str(error)[:200])
-            return None, "Could not create the account (the username may already exist)."
-        return {"id": int(uid), "username": username}, "Account created."
+            _, _, uid = self._execute(
+                "INSERT INTO users(username,password_hash,salt,created_at) VALUES(?,?,?,?)",
+                (username, digest, salt, _now_iso()))
+            return {"id": int(uid), "username": username}, None
+        except sqlite3.IntegrityError:
+            return None, "That username is already taken."
 
     def login_user(self, username, password):
-        """Returns (user_dict_or_None, message). The error text is the same for a wrong
-        username and a wrong password, so nobody can discover which usernames exist."""
         username = (username or "").strip().lower()
-        password = password or ""
-        rows, _, _ = self._execute(
-            "SELECT id, password_hash, salt FROM users WHERE username = ?", (username,), fetch="one")
-        if not rows:
-            hash_password(password)           # same work as a real login (timing)
+        row, _, _ = self._execute(
+            "SELECT id,password_hash,salt FROM users WHERE username=?", (username,), fetch="one")
+        if row is None:
+            hash_password(password or "")
             return None, "Wrong username or password."
-        uid, stored_hash, salt = rows
-        _, digest = hash_password(password, salt)
-        if not hmac.compare_digest(digest, stored_hash):
+        _, digest = hash_password(password or "", row["salt"])
+        if not hmac.compare_digest(digest, row["password_hash"]):
             return None, "Wrong username or password."
-        return {"id": int(uid), "username": username}, "Logged in."
+        return {"id": int(row["id"]), "username": username}, None
 
-    # ---------- memories ----------
-    def get_memories(self, user_id):
-        """All saved memories of ONE user."""
+    def list_memories(self, user_id):
         if user_id is None:
             return []
         rows, _, _ = self._execute(
-            "SELECT id, memory_category, memory_value, created_at, updated_at "
-            "FROM user_memory WHERE user_id = ? ORDER BY id", (int(user_id),), fetch="all")
-        return [{"id": r[0], "category": r[1], "value": r[2],
-                 "created_at": str(r[3]), "updated_at": str(r[4])} for r in rows or []]
+            "SELECT id,memory_category,memory_value,created_at,updated_at "
+            "FROM user_memory WHERE user_id=? ORDER BY id", (int(user_id),), fetch="all")
+        return [dict(r) for r in rows]
+
+    def get_memories(self, user_id):
+        return [{"id": m["id"], "category": m["memory_category"], "value": m["memory_value"],
+                 "created_at": m["created_at"], "updated_at": m["updated_at"]}
+                for m in self.list_memories(user_id)]
 
     def save_memory(self, user_id, category, value):
-        """Insert or update (UPSERT). One row per (user, category), so no duplicates.
-        Returns (ok, message, cleaned_value)."""
-        if user_id is None:
-            return False, "Not logged in.", None
-        ok, val, error = validate_memory(category, value)
+        ok, clean, err = validate_memory(category, value)
         if not ok:
-            return False, error, None
-
-        if category == "learning_interest":          # interests are merged, not replaced
-            existing = next((m["value"] for m in self.get_memories(user_id)
-                             if m["category"] == category), None)
+            return False, err, None
+        if category == "learning_interest":
+            existing = next((x["memory_value"] for x in self.list_memories(user_id)
+                             if x["memory_category"] == category), "")
             if existing:
-                items = [x.strip() for x in existing.split(",") if x.strip()]
-                if val.lower() not in [i.lower() for i in items]:
-                    items.append(val)
-                while len(", ".join(items)) > MAX_VALUE_CHARS and len(items) > 1:
-                    items.pop(0)
-                val = ", ".join(items)
-
+                parts = [x.strip() for x in existing.split(",") if x.strip()]
+                if clean.lower() not in [x.lower() for x in parts]:
+                    parts.append(clean)
+                clean = ", ".join(parts)[-MAX_VALUE_CHARS:]
         now = _now_iso()
         self._execute(
-            "INSERT INTO user_memory (user_id, memory_category, memory_value, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT (user_id, memory_category) DO UPDATE SET "
-            "memory_value = EXCLUDED.memory_value, updated_at = EXCLUDED.updated_at",
-            (int(user_id), category, val, now, now))
-        return True, "Saved.", val
+            """INSERT INTO user_memory(user_id,memory_category,memory_value,created_at,updated_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(user_id,memory_category) DO UPDATE SET
+               memory_value=excluded.memory_value,updated_at=excluded.updated_at""",
+            (int(user_id), category, clean, now, now))
+        return True, "Saved.", clean
 
     def delete_memory(self, user_id, memory_id):
-        """Delete one memory, only if it belongs to this user."""
         _, count, _ = self._execute(
-            "DELETE FROM user_memory WHERE id = ? AND user_id = ?", (int(memory_id), int(user_id)))
+            "DELETE FROM user_memory WHERE id=? AND user_id=?", (int(memory_id), int(user_id)))
         return count > 0
 
+    def delete_memories(self, user_id, ids):
+        ids = [int(x) for x in (ids or [])]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        _, count, _ = self._execute(
+            f"DELETE FROM user_memory WHERE user_id=? AND id IN ({placeholders})",
+            (int(user_id), *ids))
+        return max(0, count)
+
     def delete_all_memories(self, user_id):
-        _, count, _ = self._execute("DELETE FROM user_memory WHERE user_id = ?", (int(user_id),))
-        return max(count, 0)
+        _, count, _ = self._execute("DELETE FROM user_memory WHERE user_id=?", (int(user_id),))
+        return max(0, count)
 
 
-# ==========================================
-# 8. RETRIEVAL: choose relevant memories and put them into the prompt
-# ==========================================
+def create_store_from_env():
+    try:
+        return MemoryStore()
+    except Exception as exc:
+        print("SQLite memory initialization failed:", str(exc)[:250])
+        return None
+
+
+class LoginLimiter:
+    def __init__(self, max_failures=5, window=300, lockout=300):
+        self.max_failures, self.window, self.lockout = max_failures, window, lockout
+        self.failures, self.locked_until = {}, {}
+
+    def allowed(self, username):
+        import time
+        return self.locked_until.get((username or "").lower(), 0) <= time.time()
+
+    def failed(self, username):
+        import time
+        key, now = (username or "").lower(), time.time()
+        recent = [t for t in self.failures.get(key, []) if now - t < self.window] + [now]
+        self.failures[key] = recent
+        if len(recent) >= self.max_failures:
+            self.locked_until[key] = now + self.lockout
+
+    def success(self, username):
+        key = (username or "").lower()
+        self.failures.pop(key, None)
+        self.locked_until.pop(key, None)
+
+
+def register_user(store, username, password):
+    return store.register_user(username, password)
+
+
+def login_user(store, username, password, limiter=None):
+    if limiter and not limiter.allowed(username):
+        return None, "Too many failed attempts. Please wait before trying again."
+    user, error = store.login_user(username, password)
+    if error:
+        if limiter:
+            limiter.failed(username)
+        return None, error
+    if limiter:
+        limiter.success(username)
+    return user, None
+
+
+def classify_memory(user_message, llm=None, use_llm=True):
+    candidates = classify_memory_all(user_message, llm if use_llm else None)
+    first = candidates[0] if candidates else _result("NO_PERMANENT_MEMORY")
+    return {**first, "items": candidates}
+
+
+def decide_memory_action(classification, existing_value=None, auto_save=False, logged_in=None):
+    if not isinstance(classification, dict):
+        return {"action": "DO_NOT_SAVE", "message": "Invalid classification.", "items": []}
+    candidates = classification.get("items") or [classification]
+    safe_items, blocked, uncertain, already = [], False, False, False
+    for item in candidates:
+        kind = item.get("memory_type")
+        if kind == "SHORT_TERM_MEMORY":
+            continue
+        if kind != "LONG_TERM_MEMORY":
+            continue
+        confidence = float(item.get("confidence", 0) or 0)
+        if confidence < LONG_TERM_CONFIDENCE:
+            uncertain = True
+            continue
+        ok, value, _ = validate_memory(item.get("category"), item.get("value"))
+        if not ok or contains_sensitive(value):
+            blocked = True
+            continue
+        if _same_value(item.get("category"), existing_value, value):
+            already = True
+            continue
+        safe_items.append({"category": item["category"], "value": value,
+                           "information": item.get("information", ""),
+                           "confidence": confidence})
+    if safe_items:
+        if logged_in is False:
+            return {"action": "LOGIN_REQUIRED", "message": "Log in to save personal memories.", "items": safe_items}
+        return {"action": "AUTO_SAVE" if auto_save else "ASK_CONSENT",
+                "message": "Saved automatically." if auto_save else "Your approval is required.",
+                "items": safe_items, "value": safe_items[0]["value"]}
+    if already:
+        return {"action": "ALREADY_SAVED", "message": "This information is already saved.", "items": [],
+                "value": existing_value}
+    if blocked:
+        return {"action": "BLOCK_SENSITIVE", "message": "Sensitive information will not be saved.", "items": []}
+    if uncertain:
+        return {"action": "SKIP_UNCERTAIN", "message": "Confidence is below the memory threshold.", "items": []}
+    if any(x.get("memory_type") == "SHORT_TERM_MEMORY" for x in candidates):
+        return {"action": "KEEP_SHORT_TERM", "message": "Keep this in conversation history only.", "items": []}
+    return {"action": "DO_NOT_SAVE", "message": "No useful long-term memory detected.", "items": []}
+
 
 _CORE_CATEGORIES = {"name", "learning_level", "language_preference"}
 _LEARN_HINTS = {"learn", "study", "career", "job", "roadmap", "plan", "suggest", "recommend",
@@ -750,7 +805,45 @@ def get_memory_context(store, user_id, message):
     return relevant, build_memory_prompt(relevant)
 
 
-# ==========================================
+def retrieve_memories(store, user_id, question):
+    all_mem = store.list_memories(user_id)
+    normalized = [{"id": m["id"], "category": m["memory_category"], "value": m["memory_value"]}
+                  for m in all_mem]
+    selected = select_relevant_memories(normalized, question)
+    selected_ids = {m["id"] for m in selected}
+    selected_rows = [m for m in all_mem if m["id"] in selected_ids]
+    decisions = [(m, m["id"] in selected_ids,
+                  "Relevant to this question" if m["id"] in selected_ids else "Not relevant to this question")
+                 for m in all_mem]
+    return selected_rows, all_mem, decisions
+
+
+def memories_to_prompt_text(memories):
+    return build_memory_prompt([{"category": m["memory_category"], "value": m["memory_value"]}
+                                for m in memories])
+
+
+def profile_from_memories(memories):
+    values = {m["memory_category"]: m["memory_value"] for m in memories}
+    return {"name": values.get("name", ""), "level": values.get("learning_level", ""),
+            "interests": values.get("learning_interest", ""), "goal": values.get("learning_goal", ""),
+            "language": values.get("language_preference", "")}
+
+
+def save_memory(store, user_id, category, value):
+    ok, message, clean_value = store.save_memory(user_id, category, value)
+    return {"ok": ok, "error": None if ok else message,
+            "value": clean_value, "status": "saved" if ok else "rejected"}
+
+
+def delete_memories(store, user_id, selected_ids):
+    return store.delete_memories(user_id, selected_ids)
+
+
+def delete_all_memories(store, user_id):
+    return store.delete_all_memories(user_id)
+
+
 # 9. ONE-CALL WORKFLOW USED BY app.py
 # ==========================================
 
