@@ -1,12 +1,7 @@
-# NeuroBot - Gradio 5 compatible dependencies
-gradio>=5.0,<6
-groq>=1.0.0
-pypdf>=4.0.0
-python-docx>=1.1.0
-Pillow>=10.0.0
-requests>=2.31.0
-opencv-python-headless>=4.9.0
-imageio-ffmpeg>=0.5.1
-python-multipart>=0.0.9
-
-# SQLite is included with Python. No psycopg2 or SQLite pip package is needed.
+gradio<6
+groq
+pypdf
+python-docx
+psycopg2-binary
+numpy
+httpx
