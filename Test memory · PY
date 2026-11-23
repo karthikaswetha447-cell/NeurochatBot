@@ -17,11 +17,20 @@ import memory_manager as mm
 mm.PBKDF2_ROUNDS = 1000          # fast password hashing for tests only
 
 
+def _new_store(sqlite_path, wipe=True):
+    """SQLite by default. Set NEUROBOT_TEST_DATABASE_URL (database name must contain 'test') to run on PostgreSQL."""
+    from test_rag import db_url_for_tests
+    store = mm.MemoryStore(database_url=db_url_for_tests(), sqlite_path=sqlite_path)
+    if wipe and store.backend == "postgres":
+        store._execute("TRUNCATE users RESTART IDENTITY CASCADE")
+    return store
+
+
 class FakeStoreMixin:
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.tmp.close()
-        self.store = mm.MemoryStore(database_url="", sqlite_path=self.tmp.name)
+        self.store = _new_store(self.tmp.name)
         self.alice, _ = self.store.register_user("alice", "secret123")
         self.bob, _ = self.store.register_user("bob", "secret456")
 
@@ -228,7 +237,7 @@ class TestStorage(FakeStoreMixin, unittest.TestCase):
 
     def test_persistence_after_reconnect(self):
         self.store.save_memory(self.alice["id"], "name", "Alice")
-        again = mm.MemoryStore(database_url="", sqlite_path=self.tmp.name)    # "server restart"
+        again = _new_store(self.tmp.name, wipe=False)    # "server restart"
         u, _ = again.login_user("alice", "secret123")
         self.assertEqual(again.get_memories(u["id"])[0]["value"], "Alice")
 
